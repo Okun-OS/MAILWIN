@@ -1,4 +1,5 @@
 import { NextResponse, type NextRequest } from "next/server";
+import { appUrl } from "@/lib/env";
 import { cookies } from "next/headers";
 import { google } from "googleapis";
 import { db, schema } from "@/lib/db";
@@ -9,7 +10,7 @@ import { audit } from "@/lib/audit";
 import { enqueue } from "@/lib/jobs/queue";
 
 function fail(req: NextRequest, code: string) {
-  return NextResponse.redirect(new URL(`/login?fehler=${code}`, req.url));
+  return NextResponse.redirect(appUrl(`/login?fehler=${code}`));
 }
 
 export async function GET(req: NextRequest) {
@@ -66,5 +67,5 @@ export async function GET(req: NextRequest) {
   await audit({ userId: user.id, accountId: account!.id, actor: "user", action: "connect_account", status: "success", details: { provider: "gmail", scopes } });
   await enqueue("sync_account", { accountId: account!.id }, { dedupeKey: `sync:${account!.id}` });
 
-  return NextResponse.redirect(new URL(saved.intent === "connect" ? "/einstellungen?verbunden=1" : "/", req.url));
+  return NextResponse.redirect(appUrl(saved.intent === "connect" ? "/einstellungen?verbunden=1" : "/"));
 }

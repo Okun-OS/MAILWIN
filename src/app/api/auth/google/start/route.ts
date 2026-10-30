@@ -2,13 +2,13 @@ import { NextResponse, type NextRequest } from "next/server";
 import { cookies } from "next/headers";
 import { CodeChallengeMethod } from "google-auth-library";
 import { oauthClient, GOOGLE_SCOPES } from "@/lib/auth/google-oauth";
-import { integrations } from "@/lib/env";
+import { appUrl, integrations } from "@/lib/env";
 import { randomToken } from "@/lib/crypto";
 
 /** Startet Anmeldung bzw. das Verbinden eines weiteren Gmail-Kontos (OAuth 2 mit PKCE). */
 export async function GET(req: NextRequest) {
   if (!integrations.google) {
-    return NextResponse.redirect(new URL("/login?fehler=google_nicht_konfiguriert", req.url));
+    return NextResponse.redirect(appUrl("/login?fehler=google_nicht_konfiguriert"));
   }
   const client = oauthClient();
   const state = randomToken(24);

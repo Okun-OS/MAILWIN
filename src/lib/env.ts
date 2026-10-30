@@ -25,3 +25,11 @@ export const integrations = {
   google: Boolean(env.GOOGLE_CLIENT_ID && env.GOOGLE_CLIENT_SECRET),
   marvin: Boolean(env.ANTHROPIC_API_KEY),
 };
+
+/**
+ * Absolute URL für Weiterleitungen. Nicht aus req.url ableiten: Hinter einem Proxy
+ * (Railway) ist das die interne Adresse, z. B. http://localhost:8080.
+ */
+export function appUrl(path: string): URL {
+  return new URL(path, env.APP_URL);
+}
