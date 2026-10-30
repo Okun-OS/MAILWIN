@@ -1,5 +1,5 @@
 import Link from "next/link";
-import { count, eq } from "drizzle-orm";
+import { and, count, eq } from "drizzle-orm";
 import { requireUser } from "@/lib/auth/session";
 import { db, schema } from "@/lib/db";
 import { integrations } from "@/lib/env";
@@ -12,6 +12,9 @@ import { PermissionSelect } from "@/components/PermissionSelect";
 import { SignatureForm } from "@/components/SignatureForm";
 import { ActionButton } from "@/components/ConfirmButton";
 import { Icon } from "@/components/Icon";
+import { CrmIntegrationSection } from "@/components/CrmIntegrationSection";
+import { hasFeature } from "@/lib/features";
+import { appUrl } from "@/lib/env";
 import { disconnectAccountAction, setTimezoneAction, syncNowAction } from "../actions";
 
 export const metadata = { title: "Einstellungen" };
@@ -28,10 +31,11 @@ const TIMEZONES = ["Europe/Berlin", "Europe/Vienna", "Europe/Zurich", "Europe/Lo
 export default async function SettingsPage({ searchParams }: { searchParams: Promise<{ verbunden?: string; fehler?: string }> }) {
   const user = await requireUser();
   const sp = await searchParams;
-  const [accounts, signatures, [sessions]] = await Promise.all([
+  const [accounts, signatures, [sessions], [crm]] = await Promise.all([
     listAccounts(user.id),
     db.select().from(schema.signatures).where(eq(schema.signatures.userId, user.id)),
     db.select({ n: count() }).from(schema.sessions).where(eq(schema.sessions.userId, user.id)),
+    db.select().from(schema.integrations).where(and(eq(schema.integrations.userId, user.id), eq(schema.integrations.kind, "okun_crm"))),
   ]);
   const fmt = (d: Date | null) => (d ? d.toLocaleString("de-DE", { timeZone: user.timezone, dateStyle: "short", timeStyle: "short" }) : "noch nie");
 
@@ -40,7 +44,7 @@ export default async function SettingsPage({ searchParams }: { searchParams: Pro
       <div className="page-title">
         <div>
           <h1>Einstellungen</h1>
-          <p>Konten, Berechtigungen, Signaturen und Datenschutz.</p>
+          <p>Konten, Berechtigungen, CRM-Anbindung, Signaturen und Datenschutz.</p>
         </div>
       </div>
       {sp.verbunden && <div className="notice" style={{ marginBottom: 16 }}>Konto verbunden. Die erste Synchronisation läuft im Hintergrund.</div>}
@@ -134,6 +138,25 @@ export default async function SettingsPage({ searchParams }: { searchParams: Pro
           </div>
           <ImapConnectForm />
         </section>
+
+        <CrmIntegrationSection
+          enabled={hasFeature(user, "crm")}
+          crm={
+            crm
+              ? {
+                  baseUrl: crm.baseUrl,
+                  workspaceName: crm.workspaceName,
+                  workspaceAppUrl: crm.workspaceAppUrl,
+                  status: crm.status,
+                  lastError: crm.lastError,
+                  lastWebhook: crm.lastWebhookAt ? fmt(crm.lastWebhookAt) : null,
+                  settings: crm.settings,
+                  hasSecret: Boolean(crm.webhookSecretEnc),
+                  webhookUrl: appUrl(`/api/integrations/okun-crm/webhook?i=${crm.id}`).toString(),
+                }
+              : null
+          }
+        />
 
         <section id="signaturen">
           <div className="page-title" style={{ margin: "4px 0 12px" }}>

@@ -23,6 +23,11 @@ const ACTION: Record<string, string> = {
   reject_send_email: "Versand abgelehnt",
   approve_trash_thread: "Papierkorb bestätigt",
   reject_trash_thread: "Papierkorb abgelehnt",
+  crm_create_lead: "Lead im CRM angelegt",
+  crm_link_thread: "Konversation im CRM zugeordnet",
+  crm_unlink_thread: "CRM-Zuordnung gelöst",
+  approve_crm_create_lead: "Lead freigegeben",
+  reject_crm_create_lead: "Lead abgelehnt",
   sync: "Synchronisation",
 };
 

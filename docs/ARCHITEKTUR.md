@@ -137,6 +137,15 @@ Dauerhaftes Löschen gibt es weder in der Schnittstelle noch im OAuth-Scope (`gm
   - MIME-Erzeugung und Header-Dekodierung (`mail/mime.ts`) sind schon anbieterunabhängig.
 - **Token-Sicherheit**: AES-256-GCM mit einem Schlüssel aus `ENCRYPTION_KEY`. Das Format ist versioniert (`v1.`), damit der Schlüssel später rotiert werden kann.
 
+### CRM-Anbindung
+
+- **Gemeinsames Interface** `CrmConnector` (`src/lib/crm/types.ts`), aufgebaut wie `MailProvider`. Der erste Adapter ist das OKUN CRM (`OkunCrmClient`, Connect API v1); HubSpot und Pipedrive folgen als weitere Adapter.
+- Eine Integration pro Nutzer (`integrations`). Schlüssel und Webhook-Geheimnis sind AES-256-GCM-verschlüsselt.
+- **Zuordnung** Konversation → Kontakt/Lead in `crm_thread_links`. Gemeldete Nachrichten stehen in `crm_activities`, damit jede genau einmal ans CRM geht.
+- **Ablauf:** Delta-Sync und Versand reihen `crm_process_thread` ein (Dedupe je Konversation). Der Job meldet neue Nachrichten und ordnet im Modus „alle CRM-Kontakte“ automatisch zu.
+- **Webhooks** des CRM landen auf `/api/integrations/okun-crm/webhook`. Die Route prüft die HMAC-Signatur und erkennt Duplikate über `webhook_events`.
+- Einzelheiten: `docs/CRM-ANBINDUNG.md`.
+
 ## 6. Dauerhafte Hintergrundprozesse
 
 - **Warteschlange**: eine eigene Tabelle `jobs`. Jobs werden mit `FOR UPDATE SKIP LOCKED` geholt, deshalb können mehrere Worker parallel laufen.
@@ -146,6 +155,7 @@ Dauerhaftes Löschen gibt es weder in der Schnittstelle noch im OAuth-Scope (`gm
 - **Worker** (`npm run worker`): plant alle 2 Minuten Synchronisationen und arbeitet die Warteschlange ab, unabhängig von Browser und Chat.
 - **Ausbaustufen**:
   - Gmail-Push über Pub/Sub (`users.watch`) ersetzt das Polling.
+  - Vorhandene Job-Arten: `sync_account`, `crm_process_thread`.
   - Neue Job-Arten: `evaluate_rules` (Phase 2), `followup_due` und `reply_detected` (Phase 4).
   - Doppelte Ausführungen verhindern die Unique-Indizes auf `automation_executions` und die Dedupe-Schlüssel.
 

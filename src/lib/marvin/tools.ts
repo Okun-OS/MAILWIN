@@ -8,6 +8,7 @@ import { ensureLabel, threadAction } from "../mail/actions";
 import { createApproval } from "../approvals";
 import { assertCapability, PermissionDeniedError, type Capability } from "./permissions";
 import { getDailyOverview } from "../dashboard/data";
+import { connectorFor, createLeadForThread, getCrmIntegration, linkThread, lookupThread } from "../crm/service";
 
 export interface ToolContext {
   userId: string;
@@ -19,6 +20,8 @@ interface ToolDef<S extends z.ZodType> {
   name: string;
   description: string;
   capability: Capability;
+  /** Werkzeuge einer Gruppe werden nur angeboten, wenn die Integration verbunden ist. */
+  group?: "crm";
   input: S;
   run: (ctx: ToolContext, input: z.infer<S>) => Promise<unknown>;
 }
@@ -410,6 +413,113 @@ export const TOOLS = [
       return { ok: true };
     },
   }),
+
+  // ───────────── CRM (nur mit verbundenem OKUN CRM) ─────────────
+
+  tool({
+    name: "crm_lookup",
+    description:
+      "Schlägt im verbundenen CRM nach, wer der Absender einer Konversation (thread_id) oder eine E-Mail-Adresse ist: Kontakt, Firma, offene Leads mit Phase und die bestehende Zuordnung der Konversation. Vor Antworten an Geschäftskontakte und vor crm_create_lead nutzen. Mit include_pipelines auch Pipelines und Phasen (für stage_id).",
+    capability: "read",
+    group: "crm",
+    input: z.object({
+      thread_id: z.string().uuid().optional(),
+      email: z.string().email().optional(),
+      include_pipelines: z.boolean().default(false),
+    }),
+    run: async (ctx, input) => {
+      const integration = await getCrmIntegration(ctx.userId);
+      if (!integration) throw new Error("Es ist kein CRM verbunden.");
+      const crm = connectorFor(integration);
+      let contact = null;
+      let link = null;
+      if (input.thread_id) {
+        const res = await lookupThread(ctx.userId, input.thread_id);
+        if (res?.error) throw new Error(res.error);
+        contact = res?.contact ?? null;
+        link = res?.link ?? null;
+      } else if (input.email) {
+        contact = (await crm.findContacts(input.email))[0] ?? null;
+      } else throw new Error("Bitte thread_id oder email angeben.");
+      return {
+        kontakt: contact
+          ? {
+              contact_id: contact.id,
+              name: contact.name,
+              email: contact.email,
+              telefon: contact.phone,
+              firma: contact.company?.name ?? null,
+              offene_leads: contact.openLeads.map((l) => ({ lead_id: l.id, titel: l.title, phase: l.stage })),
+            }
+          : "Im CRM nicht vorhanden",
+        ...(input.thread_id
+          ? { zuordnung: link ? { lead_id: link.leadId, lead: link.leadTitle, phase: link.leadStage, status: link.leadStatus, nur_kontakt: !link.leadId } : "Konversation ist keinem Lead zugeordnet" }
+          : {}),
+        ...(input.include_pipelines
+          ? { pipelines: (await crm.pipelines()).map((p) => ({ pipeline: p.name, phasen: p.stages.map((s) => ({ stage_id: s.id, name: s.name })) })) }
+          : {}),
+      };
+    },
+  }),
+
+  tool({
+    name: "crm_create_lead",
+    description:
+      "Legt aus einer Konversation einen Lead (Anfrage/Verkaufschance) im CRM an. Kontakt und Firma entstehen im CRM bei Bedarf; alle Nachrichten der Konversation werden am Lead protokolliert. Nur für echte neue Anfragen – vorher mit crm_lookup prüfen, ob schon ein passender offener Lead existiert (dann crm_link_thread). Je nach Einstellung des Nutzers wird der Lead erst nach seiner Freigabe angelegt.",
+    capability: "communicate",
+    group: "crm",
+    input: z.object({
+      thread_id: z.string().uuid(),
+      title: z.string().min(1).max(160).describe("Kurzer Titel, z. B. „Anfrage: Wartungsvertrag 3 Standorte“"),
+      description: z.string().max(4000).describe("Sachliche Zusammenfassung der Anfrage: Bedarf, Umfang, Termine, Budget soweit genannt"),
+      value_eur: z.number().positive().optional().describe("Nur wenn ein Betrag genannt oder klar ableitbar ist"),
+      company_name: z.string().max(160).optional(),
+      stage_id: z.string().optional().describe("Nur auf ausdrücklichen Wunsch; sonst erste Phase der Standard-Pipeline"),
+    }),
+    run: async (ctx, input) => {
+      const integration = await getCrmIntegration(ctx.userId);
+      if (!integration) throw new Error("Es ist kein CRM verbunden.");
+      const { thread } = await threadWithAccount(ctx.userId, input.thread_id);
+      const payload = {
+        threadId: thread.id,
+        title: input.title,
+        description: input.description,
+        ...(input.value_eur ? { valueCents: Math.round(input.value_eur * 100) } : {}),
+        ...(input.company_name ? { companyName: input.company_name } : {}),
+        ...(input.stage_id ? { stageId: input.stage_id } : {}),
+      };
+      if (integration.settings.leadMode === "direct") {
+        const { lead } = await createLeadForThread(ctx.userId, thread.id, payload, "marvin");
+        return { ok: true, lead_id: lead.id, hinweis: "Lead im CRM angelegt, Nachrichten der Konversation sind protokolliert." };
+      }
+      const approval = await createApproval({
+        userId: ctx.userId,
+        action: "crm_create_lead",
+        payload,
+        summary: `Lead im CRM anlegen: „${input.title}“`,
+        conversationId: ctx.conversationId,
+        toolUseId: ctx.toolUseId,
+      });
+      return {
+        status: "wartet_auf_freigabe",
+        approval_id: approval.id,
+        hinweis: "Der Nutzer sieht den Lead-Vorschlag und gibt ihn frei. Er ist NOCH NICHT im CRM angelegt.",
+      };
+    },
+  }),
+
+  tool({
+    name: "crm_link_thread",
+    description:
+      "Ordnet eine Konversation einem bestehenden offenen Lead des Kontakts zu (lead_id aus crm_lookup) oder – ohne lead_id – nur dem Kontakt. Danach werden ihre Nachrichten am Lead protokolliert; eingehende Antworten stoppen im CRM z. B. Nachfass-Automationen. Nur zuordnen, wenn eindeutig ist, welcher Lead gemeint ist – sonst den Nutzer fragen.",
+    capability: "organize",
+    group: "crm",
+    input: z.object({ thread_id: z.string().uuid(), lead_id: z.string().optional() }),
+    run: async (ctx, input) => {
+      const link = await linkThread(ctx.userId, input.thread_id, input.lead_id ?? null, "marvin");
+      return { ok: true, lead: link.leadTitle, phase: link.leadStage, kontakt: link.contactName };
+    },
+  }),
 ];
 
 async function ownedProject(userId: string, projectId: string) {
@@ -426,8 +536,8 @@ function startOfToday() {
 
 // ───────────── API-Definitionen & Ausführung ─────────────
 
-export function toolDefinitions(opts: { webSearch: boolean } = { webSearch: true }): Anthropic.Beta.Messages.BetaToolUnion[] {
-  const custom = TOOLS.map((t) => {
+export function toolDefinitions(opts: { webSearch: boolean; crm?: boolean } = { webSearch: true }): Anthropic.Beta.Messages.BetaToolUnion[] {
+  const custom = TOOLS.filter((t) => !t.group || (t.group === "crm" && opts.crm)).map((t) => {
     const { $schema: _ignored, ...schemaJson } = z.toJSONSchema(t.input, { io: "input" }) as Record<string, unknown>;
     return {
       name: t.name,
@@ -455,6 +565,9 @@ export const TOOL_LABELS: Record<string, string> = {
   list_tasks: "Aufgaben geprüft",
   update_project: "Projekt aktualisiert",
   update_task: "Aufgabe aktualisiert",
+  crm_lookup: "Im CRM nachgeschlagen",
+  crm_create_lead: "Lead fürs CRM vorbereitet",
+  crm_link_thread: "Konversation im CRM zugeordnet",
   web_search: "Im Web recherchiert",
 };
 

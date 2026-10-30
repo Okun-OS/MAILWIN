@@ -1,4 +1,4 @@
-import { asc, eq } from "drizzle-orm";
+import { asc, eq, inArray } from "drizzle-orm";
 import { db, schema } from "./db";
 import { decrypt } from "./crypto";
 import { audit } from "./audit";
@@ -12,8 +12,14 @@ export async function exportUserData(userId: string) {
   if (!user) throw new Error("Nutzer nicht gefunden.");
   const { passwordHash: _p, ...profile } = user;
   const accounts = (await db.select().from(schema.connectedAccounts).where(eq(schema.connectedAccounts.userId, userId))).map(
-    ({ accessTokenEnc: _a, refreshTokenEnc: _r, ...rest }) => rest,
+    ({ accessTokenEnc: _a, refreshTokenEnc: _r, credentialsEnc: _c, ...rest }) => rest,
   );
+  const crm = (await db.select().from(schema.integrations).where(eq(schema.integrations.userId, userId))).map(
+    ({ apiKeyEnc: _k, webhookSecretEnc: _w, ...rest }) => rest,
+  );
+  const crmLinks = crm.length
+    ? await db.select().from(schema.crmThreadLinks).where(inArray(schema.crmThreadLinks.integrationId, crm.map((i) => i.id)))
+    : [];
   const conversations = await db.select().from(schema.marvinConversations).where(eq(schema.marvinConversations.userId, userId));
   const messages = [];
   for (const c of conversations) {
@@ -21,9 +27,11 @@ export async function exportUserData(userId: string) {
   }
   return {
     exportiertAm: new Date().toISOString(),
-    hinweis: "Datenexport aus OKUN Mailwin. Zugangsdaten zu E-Mail-Konten sind aus Sicherheitsgründen nicht enthalten.",
+    hinweis: "Datenexport aus OKUN Mailwin. Zugangsdaten zu E-Mail-Konten und zum CRM sind aus Sicherheitsgründen nicht enthalten.",
     profil: profile,
     emailKonten: accounts,
+    crmAnbindungen: crm,
+    crmZuordnungen: crmLinks,
     konversationen: await db.select().from(schema.emailThreads).where(eq(schema.emailThreads.userId, userId)),
     emails: await db.select().from(schema.emails).where(eq(schema.emails.userId, userId)),
     termine: await db.select().from(schema.calendarEvents).where(eq(schema.calendarEvents.userId, userId)),

@@ -6,6 +6,17 @@ import { sendEmail, sendEmailPayload, threadAction } from "./mail/actions";
 import { appendSystemNote } from "./marvin/history";
 import { assertCapability } from "./marvin/permissions";
 import { getOwnedAccount } from "./mail/accounts";
+import { createLeadForThread } from "./crm/service";
+
+export const crmLeadPayload = z.object({
+  threadId: z.string().uuid(),
+  title: z.string().trim().min(1).max(160),
+  description: z.string().max(10_000).default(""),
+  valueCents: z.number().int().positive().optional(),
+  pipelineId: z.string().optional(),
+  stageId: z.string().optional(),
+  companyName: z.string().max(160).optional(),
+});
 
 export type ApprovalRequest = typeof schema.approvalRequests.$inferSelect;
 
@@ -20,6 +31,14 @@ const executors = {
     run: async (userId: string, payload: { threadId: string }) => {
       await threadAction(userId, payload.threadId, "trash", "marvin");
       return { trashed: payload.threadId };
+    },
+  },
+  crm_create_lead: {
+    schema: crmLeadPayload,
+    run: async (userId: string, payload: z.infer<typeof crmLeadPayload>) => {
+      const { threadId, ...input } = payload;
+      const { lead } = await createLeadForThread(userId, threadId, input, "marvin");
+      return { leadId: lead.id, url: lead.url };
     },
   },
 } as const;

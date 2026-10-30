@@ -5,6 +5,7 @@ export const FEATURES = {
   marvin: { label: "Marvin (KI-Assistent)", description: "Chat, Entwürfe und Projektplanung mit Marvin" },
   web_search: { label: "Websuche für Marvin", description: "Marvin darf im Internet recherchieren" },
   additional_mailboxes: { label: "Weitere Postfächer", description: "Mehr als ein E-Mail-Konto verbinden" },
+  crm: { label: "CRM-Anbindung", description: "OKUN CRM verbinden, Leads anlegen und Nachrichten protokollieren" },
 } as const;
 
 export type FeatureKey = keyof typeof FEATURES;

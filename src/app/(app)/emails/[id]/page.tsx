@@ -9,6 +9,8 @@ import { Icon } from "@/components/Icon";
 import { MailFrame } from "@/components/MailFrame";
 import { ActionButton } from "@/components/ConfirmButton";
 import { MarvinIcon } from "@/components/Marvin";
+import { CrmCard } from "@/components/CrmCard";
+import { Suspense } from "react";
 import { threadActionForm } from "../../actions";
 
 export default async function ThreadPage({ params, searchParams }: { params: Promise<{ id: string }>; searchParams: Promise<{ bilder?: string; gesendet?: string }> }) {
@@ -89,9 +91,14 @@ export default async function ThreadPage({ params, searchParams }: { params: Pro
         </span>
       </Link>
 
+      {/* Externer Aufruf ans CRM – gestreamt, damit die Konversation sofort erscheint */}
+      <Suspense fallback={null}>
+        <CrmCard userId={user.id} threadId={thread.id} subject={thread.subject} />
+      </Suspense>
+
       <section className="card">
         {messages.map((m) => (
-          <article key={m.id} className="thread-msg">
+          <article key={m.id} className="thread-msg" id={`m-${m.id}`}>
             <header>
               <span className="initials">{initialsOf(m.from)}</span>
               <div className="who">

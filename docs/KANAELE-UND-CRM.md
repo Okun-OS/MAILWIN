@@ -1,6 +1,6 @@
 # Weitere Kanäle & CRM-Anbindung – Plan
 
-Stand: Planung. Nichts davon ist umgesetzt. Die Reihenfolge entspricht der Priorität.
+Stand: WhatsApp und weitere Kanäle sind geplant. Die **OKUN-CRM-Anbindung ist umgesetzt**, siehe `docs/CRM-ANBINDUNG.md`. Die Reihenfolge entspricht der Priorität.
 
 ---
 
@@ -127,7 +127,7 @@ Version 1. Diese Spezifikation setzt das OKUN CRM um. Mailwin ist der Aufrufer.
 
 1. Stripe-Buchung und Website vor der Anmeldung (wird von dir vorbereitet)
 2. Phase 2 aus dem Master-Prompt: Postfach-Aufräumassistent und Automationsregeln
-3. **CRM: Mailwin-Seite der OKUN-CRM-Anbindung**, sobald die Connect API im CRM steht
+3. ~~CRM: Mailwin-Seite der OKUN-CRM-Anbindung~~ ✅ umgesetzt; Test gegen die echte Testinstanz offen
 4. **WhatsApp Business**, sobald Meta-Konto und App vorbereitet sind
 5. HubSpot- und Pipedrive-Adapter
 6. Teams/Slack, Messenger/Instagram, SMS an Kunden

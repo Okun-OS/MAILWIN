@@ -9,6 +9,7 @@ import { executeTool, toolDefinitions } from "./tools";
 import { MARVIN_SYSTEM_PROMPT } from "./prompt";
 import { hasFeature } from "../features";
 import { recordUsage } from "../usage";
+import { getCrmIntegration } from "../crm/service";
 
 export const MARVIN_MODEL = "claude-opus-5-5";
 const MAX_STEPS = 12;
@@ -46,6 +47,7 @@ export async function getOwnedConversation(userId: string, conversationId: strin
 /** Aktueller Kontext als Text vor der Nutzernachricht (hält den System-Prompt stabil und cachebar). */
 async function contextBlock(user: { id: string; name: string | null; timezone: string }, projectId: string | null) {
   const accounts = await listAccounts(user.id);
+  const crm = await getCrmIntegration(user.id);
   const [project] = projectId ? await db.select().from(schema.projects).where(eq(schema.projects.id, projectId)) : [];
   const now = new Date().toLocaleString("de-DE", { timeZone: user.timezone, dateStyle: "full", timeStyle: "short" });
   const lines = [
@@ -54,6 +56,7 @@ async function contextBlock(user: { id: string; name: string | null; timezone: s
     accounts.length
       ? `Konten: ${accounts.map((a) => `${a.emailAddress} [account_id ${a.id}, Status ${a.status}, Stufe „${LEVEL_LABEL[a.permissionLevel]}“]`).join("; ")}`
       : "Konten: noch keines verbunden",
+    ...(crm ? [`CRM: OKUN CRM „${crm.workspaceName ?? "verbunden"}“ (${crm.status === "active" ? "aktiv – Werkzeuge crm_*" : "Verbindung unterbrochen"}; neue Leads ${crm.settings.leadMode === "direct" ? "direkt anlegen" : "nur nach Freigabe"})`] : []),
     ...(project
       ? [
           `Diese Unterhaltung gehört zum Projekt „${project.name}“ (project_id ${project.id}, Status ${project.status}).`,
@@ -104,7 +107,8 @@ export async function runMarvinTurn(
     await db.update(schema.marvinConversations).set({ title: text.slice(0, 80) }).where(eq(schema.marvinConversations.id, conversationId));
   }
 
-  const tools = toolDefinitions({ webSearch: hasFeature(user, "web_search") });
+  const crm = await getCrmIntegration(user.id);
+  const tools = toolDefinitions({ webSearch: hasFeature(user, "web_search"), crm: crm?.status === "active" });
   for (let step = 0; step < MAX_STEPS; step++) {
     const messages = toApiMessages(await loadMessages(conversationId));
     let response: Anthropic.Beta.Messages.BetaMessage;

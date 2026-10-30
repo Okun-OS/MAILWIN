@@ -4,6 +4,7 @@ import { db, schema } from "../db";
 import { audit } from "../audit";
 import { getOwnedAccount, markReauthRequired, providerFor, type Account } from "./accounts";
 import { refreshThreads, storeMessage } from "./sync";
+import { queueCrmProcessing } from "../crm/service";
 import { replySubject } from "./mime";
 import { ReauthRequiredError, type Address, type OutgoingAttachment } from "./types";
 
@@ -106,6 +107,8 @@ export async function sendEmail(userId: string, raw: SendEmailPayload, actor: Ac
     // Gesendete Nachricht sofort lokal ablegen, damit Verlauf und „wartet auf Antwort“ stimmen
     const threadId = await storeMessage(account, await provider.getMessage(sent.providerMessageId));
     await refreshThreads(account, [threadId]);
+    // Ausgehende Nachricht am verknüpften Lead protokollieren (Ablauf C)
+    await queueCrmProcessing(userId, [threadId]).catch((err) => console.error("CRM-Meldung nicht eingeplant", err));
     await audit({
       userId,
       accountId: account.id,

@@ -34,8 +34,9 @@ export default async function CustomerPage({ params }: { params: Promise<{ id: s
   const [u] = await db.select().from(schema.users).where(eq(schema.users.id, id));
   if (!u) notFound();
   const monthStart = new Date(new Date().getFullYear(), new Date().getMonth(), 1);
-  const [accounts, [sessions], notes, logs, [usageMonth], [usageTotal], [counts]] = await Promise.all([
+  const [accounts, [crm], [sessions], notes, logs, [usageMonth], [usageTotal], [counts]] = await Promise.all([
     db.select().from(schema.connectedAccounts).where(eq(schema.connectedAccounts.userId, id)),
+    db.select().from(schema.integrations).where(eq(schema.integrations.userId, id)),
     db.select({ n: count() }).from(schema.sessions).where(eq(schema.sessions.userId, id)),
     db
       .select({ note: schema.supportNotes, author: schema.users.email })
@@ -193,6 +194,17 @@ export default async function CustomerPage({ params }: { params: Promise<{ id: s
           </table>
         ) : (
           <p className="muted small">Noch kein Postfach verbunden.</p>
+        )}
+        <div className="card-head" style={{ marginTop: 18 }}><h2>CRM</h2></div>
+        {crm ? (
+          <p className="small" style={{ margin: 0 }}>
+            <b>OKUN CRM · {crm.workspaceName ?? "unbekannt"}</b>{" "}
+            <span className={`badge ${crm.status === "active" ? "badge-green" : "badge-red"}`}>{crm.status === "active" ? "verbunden" : "unterbrochen"}</span>
+            <span className="muted"> · {crm.baseUrl} · Übertragung: {crm.settings.logMode} · Leads: {crm.settings.leadMode} · Webhook: {crm.webhookSecretEnc ? (crm.lastWebhookAt ? `zuletzt ${fmt(crm.lastWebhookAt)}` : "eingerichtet") : "nein"}</span>
+            {crm.lastError && <span style={{ display: "block", color: "var(--mw-red-500)" }}>{crm.lastError}</span>}
+          </p>
+        ) : (
+          <p className="muted small" style={{ margin: 0 }}>Kein CRM verbunden.</p>
         )}
       </section>
 

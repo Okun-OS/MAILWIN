@@ -5,6 +5,7 @@
 import { claimNext, complete, fail, releaseStale } from "../lib/jobs/queue";
 import { handlers, PermanentJobError, scheduleSyncs } from "../lib/jobs/handlers";
 import { pool } from "../lib/db";
+import { pruneWebhookEvents } from "../lib/crm/webhook";
 
 const SYNC_INTERVAL_MS = 2 * 60_000;
 const IDLE_MS = 2_000;
@@ -37,6 +38,7 @@ async function main() {
       if (Date.now() - lastSchedule > SYNC_INTERVAL_MS) {
         await releaseStale();
         await scheduleSyncs();
+        await pruneWebhookEvents();
         lastSchedule = Date.now();
       }
       const worked = await tick();

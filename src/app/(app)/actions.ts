@@ -65,6 +65,8 @@ export async function approveAction(_prev: ActionState, form: FormData): Promise
   if (form.has("body")) edits.body = String(form.get("body"));
   if (form.has("to")) edits.to = parseAddressList(String(form.get("to")));
   if (form.has("cc")) edits.cc = parseAddressList(String(form.get("cc")));
+  if (form.has("title")) edits.title = String(form.get("title")).trim();
+  if (form.has("description")) edits.description = String(form.get("description"));
   try {
     const result = await approve(user.id, id, Object.keys(edits).length ? edits : undefined);
     revalidatePath("/", "layout");

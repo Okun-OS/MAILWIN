@@ -36,6 +36,8 @@ export function ApprovalCard({ approval, accountEmail }: Props) {
   const [editing, setEditing] = useState(false);
   const p = approval.payload;
   const isEmail = approval.action === "send_email";
+  const isLead = approval.action === "crm_create_lead";
+  const editable = isEmail || isLead;
   const status = STATUS[approval.status] ?? STATUS.pending!;
   const pending = approval.status === "pending" && !approveState?.ok && !rejectState?.ok;
   const error = approveState?.error ?? rejectState?.error ?? (approval.status === "failed" ? String(approval.result?.error ?? "") : null);
@@ -43,8 +45,8 @@ export function ApprovalCard({ approval, accountEmail }: Props) {
   return (
     <div className="draft-card" id={approval.id}>
       <header>
-        <Icon name={isEmail ? "mail" : "trash"} size={16} />
-        <span style={{ flex: 1 }}>{isEmail ? "E-Mail-Entwurf zur Freigabe" : "Kritische Aktion zur Bestätigung"}</span>
+        <Icon name={isEmail ? "mail" : isLead ? "briefcase" : "trash"} size={16} />
+        <span style={{ flex: 1 }}>{isEmail ? "E-Mail-Entwurf zur Freigabe" : isLead ? "Lead fürs CRM zur Freigabe" : "Kritische Aktion zur Bestätigung"}</span>
         <span className={`badge ${status.cls}`}>{approveState?.ok ? "Ausgeführt" : rejectState?.ok ? "Abgelehnt" : status.label}</span>
       </header>
       <form action={approveFormAction}>
@@ -110,6 +112,47 @@ export function ApprovalCard({ approval, accountEmail }: Props) {
                 <p className="small muted" style={{ marginBottom: 0 }}>Deine Signatur wird beim Versand automatisch angehängt.</p>
               </>
             )
+          ) : isLead ? (
+            editing ? (
+              <>
+                <div className="field">
+                  <label>Titel</label>
+                  <input className="input" name="title" maxLength={160} defaultValue={String(p.title ?? "")} />
+                </div>
+                <div className="field">
+                  <label>Beschreibung</label>
+                  <textarea className="textarea" name="description" defaultValue={String(p.description ?? "")} />
+                </div>
+              </>
+            ) : (
+              <>
+                <div className="row">
+                  <span>Titel</span>
+                  <b>{String(p.title ?? "")}</b>
+                </div>
+                {Boolean(p.companyName) && (
+                  <div className="row">
+                    <span>Firma</span>
+                    <span>{String(p.companyName)}</span>
+                  </div>
+                )}
+                {typeof p.valueCents === "number" && (
+                  <div className="row">
+                    <span>Wert</span>
+                    <span>{(p.valueCents / 100).toLocaleString("de-DE", { style: "currency", currency: "EUR" })}</span>
+                  </div>
+                )}
+                {Boolean(p.description) && (
+                  <div className="mail-text" style={{ marginTop: 10, padding: 12, background: "var(--mw-page)", borderRadius: 10 }}>
+                    {String(p.description)}
+                  </div>
+                )}
+                <p className="small muted" style={{ marginBottom: 0 }}>
+                  Kontakt und Firma legt das CRM bei Bedarf an. Die Nachrichten der Konversation werden am Lead protokolliert.{" "}
+                  <a className="link-more" href={`/emails/${String(p.threadId)}`}>Konversation öffnen</a>
+                </p>
+              </>
+            )
           ) : (
             <p style={{ margin: 0 }}>{approval.summary}</p>
           )}
@@ -120,14 +163,14 @@ export function ApprovalCard({ approval, accountEmail }: Props) {
             <button type="submit" formAction={rejectFormAction} className="btn btn-sm" disabled={approving || rejecting}>
               Ablehnen
             </button>
-            {isEmail && (
+            {editable && (
               <button type="button" className="btn btn-sm" onClick={() => setEditing((e) => !e)}>
                 <Icon name="pen" size={14} /> {editing ? "Vorschau" : "Bearbeiten"}
               </button>
             )}
             <button type="submit" className="btn btn-primary btn-sm" disabled={approving || rejecting}>
               <Icon name={isEmail ? "send" : "check"} size={14} />
-              {approving ? "Wird ausgeführt …" : isEmail ? "Prüfen & senden" : "Bestätigen"}
+              {approving ? "Wird ausgeführt …" : isEmail ? "Prüfen & senden" : isLead ? "Im CRM anlegen" : "Bestätigen"}
             </button>
           </footer>
         )}

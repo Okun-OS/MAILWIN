@@ -4,6 +4,7 @@ Dein persönlicher KI-E-Mail-Beauftragter. **Marvin** liest, organisiert und bea
 
 - Architektur: [docs/ARCHITEKTUR.md](docs/ARCHITEKTUR.md)
 - Umsetzungsstand: [docs/STATUS.md](docs/STATUS.md)
+- CRM-Anbindung (OKUN CRM): [docs/CRM-ANBINDUNG.md](docs/CRM-ANBINDUNG.md)
 - Designreferenz: [docs/design/dashboard-referenz.png](docs/design/dashboard-referenz.png)
 
 ## Stack
@@ -62,6 +63,8 @@ Variablen für **beide** Services (am einfachsten als *Shared Variables*):
 | `MICROSOFT_CLIENT_ID`, `MICROSOFT_CLIENT_SECRET` | Microsoft 365/Outlook – App-Registrierung in Microsoft Entra ID, siehe `docs/MICROSOFT.md` |
 | `ALLOW_GOOGLE_SIGNUP` | `true` erlaubt Selbstregistrierung per Google (Standard: aus) |
 
+Die CRM-Anbindung braucht **keine** Umgebungsvariablen: Jeder Kunde trägt Adresse und API-Schlüssel seines OKUN CRM selbst unter Einstellungen → CRM-Anbindung ein (verschlüsselt gespeichert). Webhooks des CRM gehen an `https://<APP_URL>/api/integrations/okun-crm/webhook`.
+
 ## Tests
 
 ```bash
@@ -75,7 +78,8 @@ npm run typecheck
 ```
 src/app/(app)/        Seiten (Dashboard, E-Mails, Marvin, Projekte, …) und Server Actions
 src/components/       UI-Komponenten (Dashboard, Marvin, Freigabekarten)
-src/lib/mail/         Anbieter-Interface, Gmail-Adapter, MIME, Sync, Aktionen
+src/lib/mail/         Anbieter-Interface, Gmail-/IMAP-/Microsoft-Adapter, MIME, Sync, Aktionen
+src/lib/crm/          CRM-Interface, OKUN-CRM-Client, Abläufe, Webhook-Empfang
 src/lib/marvin/       Agenten-Loop, Tools, Berechtigungen, System-Prompt
 src/lib/approvals.ts  Freigaben – einzige Stelle, an der Marvin-Aktionen ausgeführt werden
 src/lib/jobs/, src/worker/  Warteschlange und Hintergrund-Worker

@@ -428,7 +428,7 @@ export const notifications = pgTable(
   {
     id: id(),
     userId: userRef(),
-    kind: text("kind").notNull(), // reply_received | deadline | followup_due | automation_error | sync_error | approval_needed
+    kind: text("kind").notNull(), // reply_received | deadline | followup_due | automation_error | sync_error | approval_needed | crm_update
     title: text("title").notNull(),
     body: text("body"),
     priority: text("priority").$type<"high" | "normal" | "low">().notNull().default("normal"),
@@ -608,3 +608,82 @@ export const usageEvents = pgTable(
   },
   (t) => [index("usage_events_user_created").on(t.userId, t.createdAt)],
 );
+
+// ───────────────────────────── Integrationen (CRM) ─────────────────────────────
+
+export type CrmSettings = {
+  /** Nachrichten automatisch ins CRM protokollieren: aus / nur verknüpfte Konversationen / alle Konversationen mit CRM-Kontakten */
+  logMode: "off" | "linked" | "known_contacts";
+  /** Leads, die Marvin anlegen möchte: erst nach Freigabe oder direkt */
+  leadMode: "approval" | "direct";
+  /** Übertragener Nachrichteninhalt: Vorschau (Datensparsamkeit) oder vollständig */
+  content: "preview" | "full";
+};
+
+export const integrations = pgTable(
+  "integrations",
+  {
+    id: id(),
+    userId: userRef(),
+    kind: text("kind").$type<"okun_crm">().notNull(),
+    baseUrl: text("base_url").notNull(),
+    apiKeyEnc: text("api_key_enc").notNull(),
+    webhookSecretEnc: text("webhook_secret_enc"),
+    status: text("status").$type<"active" | "error">().notNull().default("active"),
+    workspaceId: text("workspace_id"),
+    workspaceName: text("workspace_name"),
+    workspaceAppUrl: text("workspace_app_url"),
+    settings: jsonb("settings").$type<CrmSettings>().notNull().default({ logMode: "linked", leadMode: "approval", content: "preview" }),
+    lastError: text("last_error"),
+    lastWebhookAt: timestamp("last_webhook_at", { withTimezone: true }),
+    createdAt: createdAt(),
+    updatedAt: updatedAt(),
+  },
+  (t) => [uniqueIndex("integrations_user_kind").on(t.userId, t.kind)],
+);
+
+/** Welche Konversation gehört zu welchem CRM-Kontakt bzw. -Lead (Deal)? */
+export const crmThreadLinks = pgTable(
+  "crm_thread_links",
+  {
+    threadId: uuid("thread_id").primaryKey().references(() => emailThreads.id, { onDelete: "cascade" }),
+    integrationId: uuid("integration_id").notNull().references(() => integrations.id, { onDelete: "cascade" }),
+    contactId: text("contact_id"),
+    contactName: text("contact_name"),
+    contactUrl: text("contact_url"),
+    leadId: text("lead_id"),
+    leadTitle: text("lead_title"),
+    leadUrl: text("lead_url"),
+    leadStage: text("lead_stage"),
+    leadStatus: text("lead_status").$type<"open" | "won" | "lost">(),
+    /** manuell durch den Nutzer, durch Marvin oder automatisch (eindeutiger offener Lead) */
+    linkedBy: text("linked_by").$type<"user" | "marvin" | "auto">().notNull().default("user"),
+    /** Zeitpunkt des zuletzt übernommenen Lead-Ereignisses – ältere, verspätet zugestellte Webhooks überschreiben nichts */
+    leadEventAt: timestamp("lead_event_at", { withTimezone: true }),
+    updatedAt: updatedAt(),
+  },
+  (t) => [index("crm_thread_links_lead").on(t.integrationId, t.leadId)],
+);
+
+/** Bereits ans CRM gemeldete Nachrichten – verhindert doppelte Aufrufe */
+export const crmActivities = pgTable(
+  "crm_activities",
+  {
+    id: id(),
+    integrationId: uuid("integration_id").notNull().references(() => integrations.id, { onDelete: "cascade" }),
+    emailId: uuid("email_id").notNull().references(() => emails.id, { onDelete: "cascade" }),
+    activityId: text("activity_id").notNull(),
+    leadId: text("lead_id"),
+    createdAt: createdAt(),
+  },
+  (t) => [uniqueIndex("crm_activities_once").on(t.integrationId, t.emailId)],
+);
+
+/** Empfangene Webhook-Ereignisse (je Integration) – Zustellungen werden wiederholt, verarbeitet wird jedes Ereignis einmal */
+export const webhookEvents = pgTable("webhook_events", {
+  /** `<integrationId>:<Ereignis-ID>` */
+  id: text("id").primaryKey(),
+  integrationId: uuid("integration_id").notNull().references(() => integrations.id, { onDelete: "cascade" }),
+  type: text("type").notNull(),
+  receivedAt: timestamp("received_at", { withTimezone: true }).notNull().defaultNow(),
+});

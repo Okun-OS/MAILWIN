@@ -3,6 +3,7 @@ import { db, schema } from "../db";
 import { audit } from "../audit";
 import { markReauthRequired, providerFor, type Account } from "./accounts";
 import { ReauthRequiredError, type MailProvider, type NormalizedMessage } from "./types";
+import { queueCrmProcessing } from "../crm/service";
 
 const INITIAL_QUERY = "newer_than:30d -in:spam -in:trash";
 const INITIAL_MAX = 300;
@@ -52,7 +53,7 @@ async function initialSync(account: Account, provider: MailProvider): Promise<Sy
     ids.push(...page.ids);
     pageToken = page.nextPageToken;
   } while (pageToken && ids.length < INITIAL_MAX);
-  const fetched = await fetchAndStore(account, provider, ids.slice(0, INITIAL_MAX));
+  const { count: fetched } = await fetchAndStore(account, provider, ids.slice(0, INITIAL_MAX));
   await db.update(schema.connectedAccounts).set({ syncCursor: cursor }).where(eq(schema.connectedAccounts.id, account.id));
   return { fetched, deleted: 0, mode: "initial" };
 }
@@ -72,7 +73,9 @@ async function deltaSync(account: Account, provider: MailProvider, cursor: strin
   const changes = await provider.changesSince(cursor, known);
   if (changes.kind === "reset") return initialSync(account, provider);
   if (changes.flagUpdates) await applyFlagUpdates(account, changes.flagUpdates);
-  const fetched = await fetchAndStore(account, provider, changes.changedMessageIds);
+  const { count: fetched, threadIds } = await fetchAndStore(account, provider, changes.changedMessageIds);
+  // Neue Nachrichten ans CRM melden (nur Delta – der Erstabruf alter Mails löst nichts aus)
+  await queueCrmProcessing(account.userId, threadIds);
   let deleted = 0;
   if (changes.deletedMessageIds.length) {
     const removed = await db
@@ -86,7 +89,7 @@ async function deltaSync(account: Account, provider: MailProvider, cursor: strin
   return { fetched, deleted, mode: "delta" };
 }
 
-async function fetchAndStore(account: Account, provider: MailProvider, ids: string[]): Promise<number> {
+async function fetchAndStore(account: Account, provider: MailProvider, ids: string[]): Promise<{ count: number; threadIds: string[] }> {
   const touchedThreads = new Set<string>();
   let count = 0;
   for (let i = 0; i < ids.length; i += FETCH_CONCURRENCY) {
@@ -103,7 +106,7 @@ async function fetchAndStore(account: Account, provider: MailProvider, ids: stri
     }
   }
   await refreshThreads(account, [...touchedThreads]);
-  return count;
+  return { count, threadIds: [...touchedThreads] };
 }
 
 /** Speichert/aktualisiert eine Nachricht samt Thread. Gibt die interne Thread-ID zurück. */

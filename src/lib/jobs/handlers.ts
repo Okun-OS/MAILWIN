@@ -4,6 +4,8 @@ import { syncAccount } from "../mail/sync";
 import { syncGoogleCalendar, syncMicrosoftCalendar } from "../calendar/google";
 import { ReauthRequiredError } from "../mail/types";
 import { enqueue, type Job } from "./queue";
+import { processThreadForCrm } from "../crm/service";
+import { CrmError } from "../crm/types";
 
 export class PermanentJobError extends Error {}
 
@@ -20,6 +22,16 @@ export const handlers: Record<string, (job: Job) => Promise<void>> = {
     } catch (err) {
       // Abgelaufene Zugänge nicht endlos wiederholen – der Nutzer wurde benachrichtigt
       if (err instanceof ReauthRequiredError) throw new PermanentJobError(err.message);
+      throw err;
+    }
+  },
+
+  async crm_process_thread(job) {
+    try {
+      await processThreadForCrm(String(job.payload.threadId));
+    } catch (err) {
+      // Ungültige Daten oder Schlüssel: Wiederholen hilft nicht. Netz, 409, 429, 5xx: mit Backoff erneut
+      if (err instanceof CrmError && !err.retryable) throw new PermanentJobError(`${err.code}: ${err.message}`);
       throw err;
     }
   },
