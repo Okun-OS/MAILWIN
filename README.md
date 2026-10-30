@@ -40,7 +40,7 @@ Mailwin braucht drei Bausteine im selben Railway-Projekt:
 1. **PostgreSQL**: über „New → Database → PostgreSQL“ anlegen.
 2. **Web-Service** (dieses Repository):
    - *Settings → Source*: Branch mit dem Code wählen. **Auf `main` liegt bisher nur `.gitkeep`**, ein Build von dort schlägt fehl.
-   - *Settings → Deploy → Pre-Deploy Command*: `npm run db:migrate`
+   - Migrationen laufen automatisch beim Start (`npm start`), ein Pre-Deploy-Befehl ist nicht nötig.
    - *Settings → Deploy → Healthcheck Path*: `/api/health`
    - Start und Build erkennt Railpack automatisch (`npm run build`, `npm start`; `PORT` wird übernommen).
    - Einen Domain-Namen erzeugen und als `APP_URL` eintragen.

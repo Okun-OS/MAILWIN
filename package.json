@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "next dev",
     "build": "next build",
-    "start": "next start",
+    "start": "node --env-file-if-exists=.env --import tsx src/lib/db/migrate.ts && next start",
     "worker": "node --env-file-if-exists=.env --import tsx src/worker/index.ts",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
