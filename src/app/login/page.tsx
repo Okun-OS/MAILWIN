@@ -1,53 +1,47 @@
-import Image from "next/image";
 import { redirect } from "next/navigation";
-import { getCurrentUser } from "@/lib/auth/session";
+import { getSessionState } from "@/lib/auth/session";
 import { integrations } from "@/lib/env";
-import { Brand } from "@/components/Brand";
-import { MarvinPointing } from "@/components/Marvin";
+import { AuthShell } from "@/components/auth/AuthShell";
+import { LoginForm } from "@/components/auth/forms";
 
 export const metadata = { title: "Anmelden" };
 
 const ERRORS: Record<string, string> = {
-  google_nicht_konfiguriert: "Die Google-Anmeldung ist auf diesem Server noch nicht eingerichtet (GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET fehlen).",
-  zugriff_verweigert: "Du hast den Zugriff bei Google abgelehnt. Ohne Zugriff kann Marvin dein Postfach nicht bearbeiten.",
+  google_nicht_konfiguriert: "Die Google-Anmeldung ist auf diesem Server noch nicht eingerichtet.",
+  zugriff_verweigert: "Du hast den Zugriff bei Google abgelehnt.",
   sitzung_abgelaufen: "Die Anmeldung hat zu lange gedauert. Bitte versuche es noch einmal.",
   ungueltiger_status: "Die Anmeldung konnte nicht bestätigt werden. Bitte versuche es noch einmal.",
   email_nicht_bestaetigt: "Die E-Mail-Adresse dieses Google-Kontos ist nicht bestätigt.",
+  kein_konto: "Zu diesem Google-Konto gibt es noch keinen Mailwin-Zugang. Bitte melde dich mit deinen Zugangsdaten an.",
+  konto_gesperrt: "Dieses Konto ist gesperrt. Bitte wende dich an den Support.",
 };
 
-export default async function LoginPage({ searchParams }: { searchParams: Promise<{ fehler?: string }> }) {
-  if (await getCurrentUser()) redirect("/");
-  const { fehler } = await searchParams;
+export default async function LoginPage({ searchParams }: { searchParams: Promise<{ fehler?: string; zurueckgesetzt?: string }> }) {
+  const state = await getSessionState();
+  if (state?.session.twoFactorVerified) redirect("/");
+  if (state) redirect("/login/code");
+  const sp = await searchParams;
   return (
-    <div className="login">
-      <div className="visual">
-        <Image src="/brand/buero-hintergrund.webp" alt="" fill priority className="bg" sizes="55vw" />
-        <div className="robot">
-          <MarvinPointing width={520} priority />
-        </div>
-      </div>
-      <div className="form">
-        <Brand />
-        <h1 style={{ fontSize: 34, letterSpacing: "-0.02em" }}>
-          Dein KI-Assistent für <span style={{ color: "var(--mw-green-600)" }}>E-Mail, Termine und Projekte.</span>
-        </h1>
-        <p className="muted" style={{ fontSize: 15, margin: 0 }}>
-          Du kümmerst dich um deine Ziele. Marvin kümmert sich um deine E-Mails und die damit verbundenen Aufgaben.
-        </p>
-        {fehler && <div className="notice error">{ERRORS[fehler] ?? "Die Anmeldung ist fehlgeschlagen."}</div>}
-        {integrations.google ? (
+    <AuthShell
+      title={
+        <>
+          Willkommen zurück bei <span style={{ color: "var(--mw-green-600)" }}>Mailwin.</span>
+        </>
+      }
+      subtitle="Melde dich mit deinen Zugangsdaten an."
+    >
+      {sp.fehler && <div className="notice error">{ERRORS[sp.fehler] ?? "Die Anmeldung ist fehlgeschlagen."}</div>}
+      {sp.zurueckgesetzt && <div className="notice">Dein Passwort wurde geändert. Du kannst dich jetzt anmelden.</div>}
+      <LoginForm />
+      {integrations.google && (
+        <>
+          <div className="small muted" style={{ textAlign: "center" }}>oder</div>
           <a className="google-btn" href="/api/auth/google/start">
             <GoogleLogo /> Mit Google anmelden
           </a>
-        ) : (
-          <div className="notice warn">{ERRORS.google_nicht_konfiguriert}</div>
-        )}
-        <p className="small muted">
-          Mailwin fragt nur die nötigen Berechtigungen an: E-Mails lesen und organisieren, E-Mails senden (immer erst nach deiner Freigabe) und deinen Kalender
-          lesen. Dauerhaftes Löschen ist technisch ausgeschlossen. Zugangsdaten werden verschlüsselt gespeichert.
-        </p>
-      </div>
-    </div>
+        </>
+      )}
+    </AuthShell>
   );
 }
 

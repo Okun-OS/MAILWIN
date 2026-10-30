@@ -426,7 +426,7 @@ function startOfToday() {
 
 // ───────────── API-Definitionen & Ausführung ─────────────
 
-export function toolDefinitions(): Anthropic.Beta.Messages.BetaToolUnion[] {
+export function toolDefinitions(opts: { webSearch: boolean } = { webSearch: true }): Anthropic.Beta.Messages.BetaToolUnion[] {
   const custom = TOOLS.map((t) => {
     const { $schema: _ignored, ...schemaJson } = z.toJSONSchema(t.input, { io: "input" }) as Record<string, unknown>;
     return {
@@ -436,6 +436,7 @@ export function toolDefinitions(): Anthropic.Beta.Messages.BetaToolUnion[] {
     };
   });
   // Echte Websuche (serverseitig bei Anthropic) für Recherche – Quellen werden im Chat angezeigt
+  if (!opts.webSearch) return custom;
   return [...custom, { type: "web_search_20260209", name: "web_search", max_uses: 5 }];
 }
 

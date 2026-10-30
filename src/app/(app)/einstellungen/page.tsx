@@ -1,8 +1,11 @@
 import Link from "next/link";
-import { eq } from "drizzle-orm";
+import { count, eq } from "drizzle-orm";
 import { requireUser } from "@/lib/auth/session";
 import { db, schema } from "@/lib/db";
 import { integrations } from "@/lib/env";
+import { channels } from "@/lib/notify";
+import { maskTarget } from "@/lib/auth/twofactor";
+import { SecuritySection } from "@/components/SecuritySection";
 import { listAccounts } from "@/lib/mail/accounts";
 import { PermissionSelect } from "@/components/PermissionSelect";
 import { SignatureForm } from "@/components/SignatureForm";
@@ -21,10 +24,14 @@ const STATUS: Record<string, { label: string; cls: string }> = {
 
 const TIMEZONES = ["Europe/Berlin", "Europe/Vienna", "Europe/Zurich", "Europe/London", "Europe/Paris", "America/New_York", "UTC"];
 
-export default async function SettingsPage({ searchParams }: { searchParams: Promise<{ verbunden?: string }> }) {
+export default async function SettingsPage({ searchParams }: { searchParams: Promise<{ verbunden?: string; fehler?: string }> }) {
   const user = await requireUser();
   const sp = await searchParams;
-  const [accounts, signatures] = await Promise.all([listAccounts(user.id), db.select().from(schema.signatures).where(eq(schema.signatures.userId, user.id))]);
+  const [accounts, signatures, [sessions]] = await Promise.all([
+    listAccounts(user.id),
+    db.select().from(schema.signatures).where(eq(schema.signatures.userId, user.id)),
+    db.select({ n: count() }).from(schema.sessions).where(eq(schema.sessions.userId, user.id)),
+  ]);
   const fmt = (d: Date | null) => (d ? d.toLocaleString("de-DE", { timeZone: user.timezone, dateStyle: "short", timeStyle: "short" }) : "noch nie");
 
   return (
@@ -36,6 +43,9 @@ export default async function SettingsPage({ searchParams }: { searchParams: Pro
         </div>
       </div>
       {sp.verbunden && <div className="notice" style={{ marginBottom: 16 }}>Konto verbunden. Die erste Synchronisation läuft im Hintergrund.</div>}
+      {sp.fehler === "weitere_postfaecher" && (
+        <div className="notice error" style={{ marginBottom: 16 }}>Weitere Postfächer sind in deinem Tarif nicht freigeschaltet. Bitte wende dich an den Support.</div>
+      )}
 
       <div className="stack">
         <section className="card card-pad" id="konten">
@@ -119,6 +129,15 @@ export default async function SettingsPage({ searchParams }: { searchParams: Pro
           )}
         </section>
 
+        <SecuritySection
+          hasPassword={Boolean(user.passwordHash)}
+          method={user.twoFactorMethod}
+          phoneMasked={user.phone ? maskTarget(user.phone) : null}
+          emailAvailable={channels.email}
+          smsAvailable={channels.sms}
+          sessionCount={sessions?.n ?? 1}
+        />
+
         <section className="card card-pad">
           <div className="card-head">
             <span className="head-icon"><Icon name="user" /></span>
@@ -145,6 +164,7 @@ export default async function SettingsPage({ searchParams }: { searchParams: Pro
             Inhalte aus E-Mails werden zur Bearbeitung an Marvin (Claude-API von Anthropic) übermittelt, sobald du ihn fragst. Beim Trennen eines Kontos werden dessen Daten aus
             Mailwin gelöscht.
           </p>
+          <a className="btn btn-sm" href="/api/export" style={{ marginTop: 12 }}>Meine Daten herunterladen (JSON)</a>
         </section>
       </div>
     </>

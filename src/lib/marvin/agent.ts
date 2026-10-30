@@ -7,6 +7,8 @@ import { LEVEL_LABEL } from "./permissions";
 import { appendMessage, loadMessages, toApiMessages } from "./history";
 import { executeTool, toolDefinitions } from "./tools";
 import { MARVIN_SYSTEM_PROMPT } from "./prompt";
+import { hasFeature } from "../features";
+import { recordUsage } from "../usage";
 
 export const MARVIN_MODEL = "claude-opus-5-5";
 const MAX_STEPS = 12;
@@ -86,7 +88,12 @@ export interface MarvinTurnResult {
  * Ein Gesprächsschritt: Nutzernachricht anhängen, dann den Tool-Loop fahren,
  * bis Marvin fertig ist. Jeder Schritt wird sofort gespeichert (append-only).
  */
-export async function runMarvinTurn(user: { id: string; name: string | null; timezone: string }, conversationId: string, text: string): Promise<MarvinTurnResult> {
+export async function runMarvinTurn(
+  user: { id: string; name: string | null; timezone: string; features: Record<string, boolean> },
+  conversationId: string,
+  text: string,
+): Promise<MarvinTurnResult> {
+  if (!hasFeature(user, "marvin")) return { stopReason: null, error: "Marvin ist für dein Konto derzeit nicht freigeschaltet." };
   const conversation = await getOwnedConversation(user.id, conversationId);
   await repairDanglingToolUse(conversationId);
   await appendMessage(conversationId, "user", [
@@ -97,7 +104,7 @@ export async function runMarvinTurn(user: { id: string; name: string | null; tim
     await db.update(schema.marvinConversations).set({ title: text.slice(0, 80) }).where(eq(schema.marvinConversations.id, conversationId));
   }
 
-  const tools = toolDefinitions();
+  const tools = toolDefinitions({ webSearch: hasFeature(user, "web_search") });
   for (let step = 0; step < MAX_STEPS; step++) {
     const messages = toApiMessages(await loadMessages(conversationId));
     let response: Anthropic.Beta.Messages.BetaMessage;
@@ -122,6 +129,7 @@ export async function runMarvinTurn(user: { id: string; name: string | null; tim
     }
 
     await appendMessage(conversationId, "assistant", response.content as unknown[]);
+    await recordUsage(user.id, response).catch((err) => console.error("Verbrauch konnte nicht gespeichert werden", err));
 
     if (response.stop_reason === "refusal") return { stopReason: "refusal", error: "Diese Anfrage kann Marvin nicht bearbeiten." };
     if (response.stop_reason === "pause_turn") continue;

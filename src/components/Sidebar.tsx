@@ -20,7 +20,7 @@ const SECONDARY: { href: string; label: string; icon: IconName }[] = [
   { href: "/einstellungen", label: "Einstellungen", icon: "settings" },
 ];
 
-export function Sidebar({ user, counts }: { user: { name: string | null; email: string; avatarUrl: string | null }; counts: { approvals: number } }) {
+export function Sidebar({ user, counts }: { user: { name: string | null; email: string; avatarUrl: string | null; isAdmin: boolean }; counts: { approvals: number } }) {
   const pathname = usePathname();
   const [open, setOpen] = useState(false);
   useEffect(() => setOpen(false), [pathname]);
@@ -47,6 +47,12 @@ export function Sidebar({ user, counts }: { user: { name: string | null; email: 
       </nav>
       <div className="nav-spacer" />
       <nav className="nav">
+        {user.isAdmin && (
+          <Link href="/admin" className={isActive("/admin") ? "active" : undefined}>
+            <Icon name="settings" />
+            Admin
+          </Link>
+        )}
         {SECONDARY.map((item) => (
           <Link key={item.href} href={item.href} className={isActive(item.href) ? "active" : undefined}>
             <Icon name={item.icon} />

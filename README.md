@@ -55,6 +55,11 @@ Variablen für **beide** Services (am einfachsten als *Shared Variables*):
 | `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET` | aus der Google Cloud Console; Redirect-URI `https://<deine-domain>/api/auth/google/callback` |
 | `ANTHROPIC_API_KEY` | für Marvin |
 | `APP_URL` | `https://<deine-domain>` |
+| `ADMIN_EMAIL` | Admin-Zugang (Standard `kontakt@okun-systems.com`) |
+| `ADMIN_INITIAL_PASSWORD` | Startpasswort des Admins, mind. 10 Zeichen. Wird nur gesetzt, solange noch kein Passwort existiert; beim ersten Login muss es geändert werden. |
+| `RESEND_API_KEY`, `MAIL_FROM` | System-E-Mails (2FA-Codes, Passwort-Links, Einladungen), z. B. `MAIL_FROM=Mailwin <noreply@okun-mailwin.com>` |
+| `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, `TWILIO_FROM` | SMS-Codes; `TWILIO_FROM` = Absendernummer (+49…) oder Messaging-Service-SID (MG…) |
+| `ALLOW_GOOGLE_SIGNUP` | `true` erlaubt Selbstregistrierung per Google (Standard: aus) |
 
 ## Tests
 

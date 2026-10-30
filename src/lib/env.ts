@@ -7,6 +7,18 @@ const schema = z.object({
   GOOGLE_CLIENT_ID: z.string().optional(),
   GOOGLE_CLIENT_SECRET: z.string().optional(),
   ANTHROPIC_API_KEY: z.string().optional(),
+  // Admin-Zugang (wird beim Start angelegt, Startpasswort nur, solange noch keins gesetzt ist)
+  ADMIN_EMAIL: z.string().email().default("kontakt@okun-systems.com"),
+  ADMIN_INITIAL_PASSWORD: z.string().min(10).optional(),
+  // Neue Nutzer per Google-Anmeldung zulassen? Standard: nein – Konten legt der Admin (später Stripe) an
+  ALLOW_GOOGLE_SIGNUP: z.enum(["true", "false"]).default("false"),
+  // System-E-Mails (Codes, Passwort-Links) über Resend
+  RESEND_API_KEY: z.string().optional(),
+  MAIL_FROM: z.string().optional(),
+  // SMS-Codes über Twilio; TWILIO_FROM = Absendernummer (+49…) oder Messaging-Service-SID (MG…)
+  TWILIO_ACCOUNT_SID: z.string().optional(),
+  TWILIO_AUTH_TOKEN: z.string().optional(),
+  TWILIO_FROM: z.string().optional(),
 });
 
 // Leere Werte (z. B. in Hosting-Oberflächen angelegt, aber nicht befüllt) gelten als nicht gesetzt

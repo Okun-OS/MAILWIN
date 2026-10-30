@@ -1,5 +1,8 @@
 import { NextResponse, type NextRequest } from "next/server";
-import { appUrl } from "@/lib/env";
+import { appUrl, env } from "@/lib/env";
+import { eq } from "drizzle-orm";
+import { sendLoginCode } from "@/lib/auth/twofactor";
+import { hasFeature } from "@/lib/features";
 import { cookies } from "next/headers";
 import { google } from "googleapis";
 import { db, schema } from "@/lib/db";
@@ -31,16 +34,29 @@ export async function GET(req: NextRequest) {
   if (!profile.email || !profile.verified_email) return fail(req, "email_nicht_bestaetigt");
   const email = profile.email.toLowerCase();
 
-  // Angemeldeter Nutzer verbindet ein weiteres Konto – sonst Anmeldung/Registrierung über dieses Konto
+  // Ein angemeldeter Nutzer verbindet ein weiteres Postfach – sonst Anmeldung mit Google
   let user = saved.intent === "connect" ? await getCurrentUser() : null;
+  let pendingTwoFactor = false;
   if (!user) {
-    const [row] = await db
-      .insert(schema.users)
-      .values({ email, name: profile.name ?? null, avatarUrl: profile.picture ?? null })
-      .onConflictDoUpdate({ target: schema.users.email, set: { avatarUrl: profile.picture ?? null, updatedAt: new Date() } })
-      .returning();
+    const [existing] = await db.select().from(schema.users).where(eq(schema.users.email, email));
+    if (existing && existing.status !== "active") return fail(req, "konto_gesperrt");
+    if (!existing && env.ALLOW_GOOGLE_SIGNUP !== "true") return fail(req, "kein_konto");
+    const [row] = existing
+      ? await db
+          .update(schema.users)
+          .set({ avatarUrl: profile.picture ?? existing.avatarUrl, name: existing.name ?? profile.name ?? null, lastLoginAt: new Date(), updatedAt: new Date() })
+          .where(eq(schema.users.id, existing.id))
+          .returning()
+      : await db.insert(schema.users).values({ email, name: profile.name ?? null, avatarUrl: profile.picture ?? null, lastLoginAt: new Date() }).returning();
     user = row!;
-    await createSession(user.id);
+    pendingTwoFactor = user.twoFactorMethod !== "none";
+    await createSession(user.id, { twoFactorVerified: !pendingTwoFactor });
+    if (pendingTwoFactor) await sendLoginCode(user);
+  }
+
+  if (saved.intent === "connect" && !hasFeature(user, "additional_mailboxes")) {
+    const existingAccounts = await db.select({ email: schema.connectedAccounts.emailAddress }).from(schema.connectedAccounts).where(eq(schema.connectedAccounts.userId, user.id));
+    if (existingAccounts.length && !existingAccounts.some((a) => a.email === email)) return NextResponse.redirect(appUrl("/einstellungen?fehler=weitere_postfaecher"));
   }
 
   const scopes = (tokens.scope ?? "").split(" ").filter(Boolean);
@@ -67,5 +83,6 @@ export async function GET(req: NextRequest) {
   await audit({ userId: user.id, accountId: account!.id, actor: "user", action: "connect_account", status: "success", details: { provider: "gmail", scopes } });
   await enqueue("sync_account", { accountId: account!.id }, { dedupeKey: `sync:${account!.id}` });
 
+  if (pendingTwoFactor) return NextResponse.redirect(appUrl("/login/code"));
   return NextResponse.redirect(appUrl(saved.intent === "connect" ? "/einstellungen?verbunden=1" : "/"));
 }

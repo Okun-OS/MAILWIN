@@ -20,6 +20,10 @@ const userRef = () => uuid("user_id").notNull().references(() => users.id, { onD
 
 // ───────────────────────────── Nutzer & Sitzungen ─────────────────────────────
 
+export const userRoleEnum = pgEnum("user_role", ["user", "admin"]);
+export const userStatusEnum = pgEnum("user_status", ["active", "disabled"]);
+export const twoFactorMethodEnum = pgEnum("two_factor_method", ["none", "email", "sms"]);
+
 export const users = pgTable("users", {
   id: id(),
   email: text("email").notNull().unique(),
@@ -28,6 +32,24 @@ export const users = pgTable("users", {
   timezone: text("timezone").notNull().default("Europe/Berlin"),
   /** Freigegebene Präferenzen (Schreibstil, Anrede …), vom Nutzer einsehbar und löschbar. */
   preferences: jsonb("preferences").$type<Record<string, unknown>>().notNull().default({}),
+  role: userRoleEnum("role").notNull().default("user"),
+  status: userStatusEnum("status").notNull().default("active"),
+  /** scrypt-Hash, siehe lib/auth/password.ts – null, solange kein Passwort gesetzt ist */
+  passwordHash: text("password_hash"),
+  mustChangePassword: boolean("must_change_password").notNull().default(false),
+  /** Zweiter Faktor: Code per E-Mail (Resend) oder SMS (Twilio) */
+  twoFactorMethod: twoFactorMethodEnum("two_factor_method").notNull().default("none"),
+  phone: text("phone"),
+  failedLogins: integer("failed_logins").notNull().default(0),
+  lockedUntil: timestamp("locked_until", { withTimezone: true }),
+  lastLoginAt: timestamp("last_login_at", { withTimezone: true }),
+  adminNote: text("admin_note"),
+  /** Abo – bis Stripe angebunden ist, pflegt der Admin den Stand von Hand */
+  plan: text("plan").$type<"trial" | "basic" | "pro" | "business" | "internal">().notNull().default("trial"),
+  subscriptionStatus: text("subscription_status").$type<"none" | "trialing" | "active" | "past_due" | "canceled">().notNull().default("trialing"),
+  subscriptionEndsAt: timestamp("subscription_ends_at", { withTimezone: true }),
+  /** Funktionen pro Kunde ab-/zuschalten, siehe lib/features.ts */
+  features: jsonb("features").$type<Record<string, boolean>>().notNull().default({}),
   createdAt: createdAt(),
   updatedAt: updatedAt(),
 });
@@ -37,8 +59,30 @@ export const sessions = pgTable("sessions", {
   tokenHash: text("token_hash").primaryKey(),
   userId: userRef(),
   expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+  /** false, solange der zweite Faktor noch aussteht */
+  twoFactorVerified: boolean("two_factor_verified").notNull().default(true),
+  userAgent: text("user_agent"),
   createdAt: createdAt(),
 });
+
+/** Einmal-Codes und -Links: 2FA-Codes, Passwort-Reset, Telefonnummer bestätigen. Nur Hashes. */
+export const authCodes = pgTable(
+  "auth_codes",
+  {
+    id: id(),
+    userId: userRef(),
+    purpose: text("purpose").$type<"two_factor" | "password_reset" | "verify_phone" | "verify_email_2fa">().notNull(),
+    codeHash: text("code_hash").notNull(),
+    channel: text("channel").$type<"email" | "sms">(),
+    /** z. B. die zu bestätigende Telefonnummer */
+    target: text("target"),
+    attempts: integer("attempts").notNull().default(0),
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+    usedAt: timestamp("used_at", { withTimezone: true }),
+    createdAt: createdAt(),
+  },
+  (t) => [index("auth_codes_user_purpose").on(t.userId, t.purpose)],
+);
 
 // ───────────────────────────── E-Mail-Konten ─────────────────────────────
 
@@ -438,7 +482,7 @@ export const auditLogs = pgTable(
     id: id(),
     userId: userRef(),
     accountId: uuid("account_id"),
-    actor: text("actor").$type<"user" | "marvin" | "automation" | "system">().notNull(),
+    actor: text("actor").$type<"user" | "marvin" | "automation" | "system" | "admin">().notNull(),
     action: text("action").notNull(),
     targetType: text("target_type"),
     targetId: text("target_id"),
@@ -469,4 +513,92 @@ export const jobs = pgTable(
     index("jobs_runnable").on(t.status, t.runAt),
     uniqueIndex("jobs_dedupe_open").on(t.dedupeKey).where(sql`status in ('queued','running')`),
   ],
+);
+
+// ───────────────────────────── Gutscheine & Aktionen ─────────────────────────────
+
+export const campaigns = pgTable("campaigns", {
+  id: id(),
+  name: text("name").notNull(),
+  description: text("description"),
+  /** Hinweistext, der während der Aktion angezeigt werden kann (z. B. auf der Website) */
+  bannerText: text("banner_text"),
+  startsAt: timestamp("starts_at", { withTimezone: true }),
+  endsAt: timestamp("ends_at", { withTimezone: true }),
+  active: boolean("active").notNull().default(true),
+  createdAt: createdAt(),
+});
+
+export const vouchers = pgTable("vouchers", {
+  id: id(),
+  code: text("code").notNull().unique(),
+  description: text("description"),
+  /** percent = Rabatt in %, fixed = Betrag in Cent, free_months = Gratismonate */
+  kind: text("kind").$type<"percent" | "fixed" | "free_months">().notNull(),
+  value: integer("value").notNull(),
+  maxRedemptions: integer("max_redemptions"),
+  redeemedCount: integer("redeemed_count").notNull().default(0),
+  validFrom: timestamp("valid_from", { withTimezone: true }),
+  validUntil: timestamp("valid_until", { withTimezone: true }),
+  active: boolean("active").notNull().default(true),
+  campaignId: uuid("campaign_id").references(() => campaigns.id, { onDelete: "set null" }),
+  createdAt: createdAt(),
+});
+
+export const voucherRedemptions = pgTable(
+  "voucher_redemptions",
+  {
+    id: id(),
+    voucherId: uuid("voucher_id").notNull().references(() => vouchers.id, { onDelete: "cascade" }),
+    userId: uuid("user_id").references(() => users.id, { onDelete: "set null" }),
+    email: text("email"),
+    redeemedAt: timestamp("redeemed_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [uniqueIndex("voucher_redemptions_once").on(t.voucherId, t.userId)],
+);
+
+// ───────────────────────────── Admin: Support, Meldungen, Nutzung ─────────────────────────────
+
+export const supportNotes = pgTable(
+  "support_notes",
+  {
+    id: id(),
+    userId: userRef(),
+    authorId: uuid("author_id").references(() => users.id, { onDelete: "set null" }),
+    body: text("body").notNull(),
+    createdAt: createdAt(),
+  },
+  (t) => [index("support_notes_user").on(t.userId, t.createdAt)],
+);
+
+/** Systemmeldungen an alle Kunden (Banner in der App) */
+export const announcements = pgTable("announcements", {
+  id: id(),
+  title: text("title").notNull(),
+  body: text("body"),
+  level: text("level").$type<"info" | "warning">().notNull().default("info"),
+  startsAt: timestamp("starts_at", { withTimezone: true }).notNull().defaultNow(),
+  endsAt: timestamp("ends_at", { withTimezone: true }),
+  active: boolean("active").notNull().default(true),
+  createdAt: createdAt(),
+});
+
+/** Verbrauch je KI-Aufruf – Grundlage für Nutzungsstatistik und Kosten pro Kunde */
+export const usageEvents = pgTable(
+  "usage_events",
+  {
+    id: id(),
+    userId: userRef(),
+    kind: text("kind").notNull(), // marvin_call
+    model: text("model"),
+    inputTokens: integer("input_tokens").notNull().default(0),
+    outputTokens: integer("output_tokens").notNull().default(0),
+    cacheReadTokens: integer("cache_read_tokens").notNull().default(0),
+    cacheWriteTokens: integer("cache_write_tokens").notNull().default(0),
+    webSearches: integer("web_searches").notNull().default(0),
+    /** geschätzte Kosten in Mikro-US-Dollar (1 $ = 1.000.000) */
+    costMicros: integer("cost_micros").notNull().default(0),
+    createdAt: createdAt(),
+  },
+  (t) => [index("usage_events_user_created").on(t.userId, t.createdAt)],
 );
