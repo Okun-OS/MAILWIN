@@ -115,6 +115,10 @@ export const connectedAccounts = pgTable(
     lastSyncedAt: timestamp("last_synced_at", { withTimezone: true }),
     lastError: text("last_error"),
     calendarEnabled: boolean("calendar_enabled").notNull().default(false),
+    /** IMAP/SMTP: Server-Einstellungen (ohne Passwort) */
+    settings: jsonb("settings").$type<Record<string, unknown>>().notNull().default({}),
+    /** IMAP/SMTP: Passwort bzw. App-Passwort, AES-256-GCM-verschlüsselt */
+    credentialsEnc: text("credentials_enc"),
     createdAt: createdAt(),
     updatedAt: updatedAt(),
   },
@@ -172,6 +176,8 @@ export const emails = pgTable(
     providerMessageId: text("provider_message_id").notNull(),
     /** RFC-822 Message-ID – für In-Reply-To/References beim Antworten */
     messageIdHeader: text("message_id_header"),
+    /** References-Header – nötig, um Antworten korrekt in die Kette einzuhängen */
+    references: text("references").array().notNull().default([]),
     from: jsonb("from").$type<Address>(),
     to: jsonb("to").$type<Address[]>().notNull().default([]),
     cc: jsonb("cc").$type<Address[]>().notNull().default([]),

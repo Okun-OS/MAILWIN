@@ -8,6 +8,7 @@ import {
   type NormalizedMessage,
   type OutgoingMessage,
   type ProviderLabel,
+  type ThreadRef,
 } from "./types";
 
 type Part = gmail_v1.Schema$MessagePart;
@@ -159,22 +160,22 @@ export class GmailProvider implements MailProvider {
     return { providerMessageId: res.data.id!, providerThreadId: res.data.threadId! };
   }
 
-  async modifyThreadLabels(threadId: string, add: string[], remove: string[]) {
+  async modifyThreadLabels(thread: ThreadRef, add: string[], remove: string[]) {
     await this.call(() =>
-      this.gmail.users.threads.modify({ userId: "me", id: threadId, requestBody: { addLabelIds: add, removeLabelIds: remove } }),
+      this.gmail.users.threads.modify({ userId: "me", id: thread.providerThreadId, requestBody: { addLabelIds: add, removeLabelIds: remove } }),
     );
   }
 
-  archiveThread(threadId: string) {
-    return this.modifyThreadLabels(threadId, [], ["INBOX"]);
+  archiveThread(thread: ThreadRef) {
+    return this.modifyThreadLabels(thread, [], ["INBOX"]);
   }
 
-  async trashThread(threadId: string) {
-    await this.call(() => this.gmail.users.threads.trash({ userId: "me", id: threadId }));
+  async trashThread(thread: ThreadRef) {
+    await this.call(() => this.gmail.users.threads.trash({ userId: "me", id: thread.providerThreadId }));
   }
 
-  markThreadRead(threadId: string, read: boolean) {
-    return read ? this.modifyThreadLabels(threadId, [], ["UNREAD"]) : this.modifyThreadLabels(threadId, ["UNREAD"], []);
+  markThreadRead(thread: ThreadRef, read: boolean) {
+    return read ? this.modifyThreadLabels(thread, [], ["UNREAD"]) : this.modifyThreadLabels(thread, ["UNREAD"], []);
   }
 
   async listLabels(): Promise<ProviderLabel[]> {

@@ -1,0 +1,1 @@
+ALTER TABLE "emails" ADD COLUMN "references" text[] DEFAULT '{}' NOT NULL;

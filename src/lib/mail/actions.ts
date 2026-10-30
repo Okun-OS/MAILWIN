@@ -68,9 +68,11 @@ export async function sendEmail(userId: string, raw: SendEmailPayload, actor: Ac
     const original = await ownedEmail(userId, payload.replyToEmailId);
     if (original.accountId !== account.id) throw new Error("Antworten müssen über das Konto der ursprünglichen Nachricht gesendet werden.");
     const thread = await ownedThread(userId, original.threadId);
+    // RFC 5322: References = Kette der beantworteten Nachricht + deren Message-ID. Sonst ordnen
+    // IMAP-Server und die Mailprogramme der Empfänger die Antwort keiner Konversation zu.
     threading = {
       inReplyTo: original.messageIdHeader ?? undefined,
-      references: original.messageIdHeader ? [original.messageIdHeader] : [],
+      references: [...new Set([...original.references, ...(original.messageIdHeader ? [original.messageIdHeader] : [])])],
       providerThreadId: thread.providerThreadId,
     };
     subject = replySubject(subject || original.subject || "");
@@ -146,11 +148,13 @@ export async function threadAction(
   const thread = await ownedThread(userId, threadId);
   const account = await getOwnedAccount(userId, thread.accountId);
   const provider = providerFor(account);
+  const msgs = await db.select().from(schema.emails).where(eq(schema.emails.threadId, threadId));
+  const ref = { providerThreadId: thread.providerThreadId, providerMessageIds: msgs.map((m) => m.providerMessageId) };
   try {
-    if (op === "archive") await provider.archiveThread(thread.providerThreadId);
-    else if (op === "trash") await provider.trashThread(thread.providerThreadId);
-    else if (op === "read" || op === "unread") await provider.markThreadRead(thread.providerThreadId, op === "read");
-    else await provider.modifyThreadLabels(thread.providerThreadId, labels?.add ?? [], labels?.remove ?? []);
+    if (op === "archive") await provider.archiveThread(ref);
+    else if (op === "trash") await provider.trashThread(ref);
+    else if (op === "read" || op === "unread") await provider.markThreadRead(ref, op === "read");
+    else await provider.modifyThreadLabels(ref, labels?.add ?? [], labels?.remove ?? []);
   } catch (err) {
     await handleProviderError(account, err);
     await audit({ userId, accountId: account.id, actor, action: `thread_${op}`, targetType: "thread", targetId: threadId, status: "failed", details: { error: String((err as Error).message) } });
@@ -158,7 +162,6 @@ export async function threadAction(
   }
 
   // Lokalen Stand angleichen (der nächste Delta-Sync bestätigt ihn)
-  const msgs = await db.select().from(schema.emails).where(eq(schema.emails.threadId, threadId));
   for (const m of msgs) {
     let labelIds = [...m.labelIds];
     if (op === "archive") labelIds = labelIds.filter((l) => l !== "INBOX");

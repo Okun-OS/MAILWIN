@@ -59,10 +59,19 @@ export interface ProviderLabel {
   color?: string | null;
 }
 
+/** Lesestatus/Markierung bekannter Nachrichten (IMAP liefert keine Änderungshistorie wie Gmail) */
+export type FlagUpdate = { isRead: boolean; isStarred: boolean };
+
 export type ChangeSet =
-  | { kind: "delta"; changedMessageIds: string[]; deletedMessageIds: string[]; cursor: string }
+  | { kind: "delta"; changedMessageIds: string[]; deletedMessageIds: string[]; cursor: string; flagUpdates?: Record<string, FlagUpdate> }
   /** Cursor zu alt → vollständige Neusynchronisation nötig */
   | { kind: "reset" };
+
+/** Eine Konversation beim Anbieter: Gmail kennt Threads, IMAP nur einzelne Nachrichten. */
+export interface ThreadRef {
+  providerThreadId: string;
+  providerMessageIds: string[];
+}
 
 /**
  * Gemeinsame Schnittstelle aller E-Mail-Anbieter. Gmail arbeitet mit Labels,
@@ -74,13 +83,15 @@ export interface MailProvider {
   listMessageIds(opts: { query?: string; pageToken?: string; max?: number }): Promise<{ ids: string[]; nextPageToken?: string }>;
   getMessage(providerMessageId: string): Promise<NormalizedMessage>;
   currentCursor(): Promise<string>;
-  changesSince(cursor: string): Promise<ChangeSet>;
+  /** `knownMessageIds`: lokal bekannte Nachrichten – nötig, um bei IMAP Löschungen zu erkennen */
+  changesSince(cursor: string, knownMessageIds?: string[]): Promise<ChangeSet>;
   send(message: OutgoingMessage): Promise<{ providerMessageId: string; providerThreadId: string }>;
-  modifyThreadLabels(providerThreadId: string, add: string[], remove: string[]): Promise<void>;
-  archiveThread(providerThreadId: string): Promise<void>;
+  /** Gmail: Labels setzen/entfernen. IMAP: in den Ordner `add[0]` verschieben. */
+  modifyThreadLabels(thread: ThreadRef, add: string[], remove: string[]): Promise<void>;
+  archiveThread(thread: ThreadRef): Promise<void>;
   /** Papierkorb – wiederherstellbar. Dauerhaftes Löschen bietet die Schnittstelle bewusst nicht an. */
-  trashThread(providerThreadId: string): Promise<void>;
-  markThreadRead(providerThreadId: string, read: boolean): Promise<void>;
+  trashThread(thread: ThreadRef): Promise<void>;
+  markThreadRead(thread: ThreadRef, read: boolean): Promise<void>;
   listLabels(): Promise<ProviderLabel[]>;
   createLabel(name: string): Promise<ProviderLabel>;
   getAttachment(providerMessageId: string, providerAttachmentId: string): Promise<Buffer>;

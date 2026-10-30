@@ -1,4 +1,4 @@
-import { and, desc, eq, inArray, sql } from "drizzle-orm";
+import { and, desc, eq, gte, inArray, sql } from "drizzle-orm";
 import { db, schema } from "../db";
 import { audit } from "../audit";
 import { markReauthRequired, providerFor, type Account } from "./accounts";
@@ -58,8 +58,20 @@ async function initialSync(account: Account, provider: MailProvider): Promise<Sy
 }
 
 async function deltaSync(account: Account, provider: MailProvider, cursor: string): Promise<SyncResult> {
-  const changes = await provider.changesSince(cursor);
+  // IMAP braucht die bekannten Nachrichten, um Löschungen und Lesestatus abzugleichen; Gmail ignoriert sie
+  const known =
+    provider.provider === "imap"
+      ? (
+          await db
+            .select({ id: schema.emails.providerMessageId })
+            .from(schema.emails)
+            .where(and(eq(schema.emails.accountId, account.id), gte(schema.emails.receivedAt, new Date(Date.now() - 45 * 86_400_000))))
+            .limit(2000)
+        ).map((r) => r.id)
+      : undefined;
+  const changes = await provider.changesSince(cursor, known);
   if (changes.kind === "reset") return initialSync(account, provider);
+  if (changes.flagUpdates) await applyFlagUpdates(account, changes.flagUpdates);
   const fetched = await fetchAndStore(account, provider, changes.changedMessageIds);
   let deleted = 0;
   if (changes.deletedMessageIds.length) {
@@ -112,6 +124,7 @@ export async function storeMessage(account: Account, m: NormalizedMessage): Prom
     threadId: thread!.id,
     providerMessageId: m.providerMessageId,
     messageIdHeader: m.messageIdHeader,
+    references: m.references,
     from: m.from,
     to: m.to,
     cc: m.cc,
@@ -193,4 +206,25 @@ async function syncLabels(account: Account, provider: MailProvider): Promise<voi
         set: { name: l.name, color: l.color ?? null },
       });
   }
+}
+
+/** Übernimmt Lesestatus/Markierung, die außerhalb von Mailwin geändert wurden (IMAP). */
+async function applyFlagUpdates(account: Account, updates: Record<string, { isRead: boolean; isStarred: boolean }>) {
+  const ids = Object.keys(updates);
+  if (!ids.length) return;
+  const rows = await db
+    .select()
+    .from(schema.emails)
+    .where(and(eq(schema.emails.accountId, account.id), inArray(schema.emails.providerMessageId, ids)));
+  const touched = new Set<string>();
+  for (const row of rows) {
+    const u = updates[row.providerMessageId]!;
+    if (row.isRead === u.isRead && row.isStarred === u.isStarred) continue;
+    const labelIds = row.labelIds.filter((l) => l !== "UNREAD" && l !== "STARRED");
+    if (!u.isRead) labelIds.push("UNREAD");
+    if (u.isStarred) labelIds.push("STARRED");
+    await db.update(schema.emails).set({ isRead: u.isRead, isStarred: u.isStarred, labelIds }).where(eq(schema.emails.id, row.id));
+    touched.add(row.threadId);
+  }
+  await refreshThreads(account, [...touched]);
 }

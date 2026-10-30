@@ -6,6 +6,7 @@ import { integrations } from "@/lib/env";
 import { channels } from "@/lib/notify";
 import { maskTarget } from "@/lib/auth/twofactor";
 import { SecuritySection } from "@/components/SecuritySection";
+import { ImapConnectForm } from "@/components/ImapConnectForm";
 import { listAccounts } from "@/lib/mail/accounts";
 import { PermissionSelect } from "@/components/PermissionSelect";
 import { SignatureForm } from "@/components/SignatureForm";
@@ -73,7 +74,7 @@ export default async function SettingsPage({ searchParams }: { searchParams: Pro
                   <tr key={a.id}>
                     <td>
                       <b>{a.emailAddress}</b>
-                      <div className="small muted">Gmail{a.calendarEnabled ? " · Kalender verbunden" : ""}</div>
+                      <div className="small muted">{a.provider === "gmail" ? "Gmail" : a.provider === "imap" ? `IMAP · ${String(a.settings.imapHost ?? "")}` : "Microsoft 365"}{a.calendarEnabled ? " · Kalender verbunden" : ""}</div>
                     </td>
                     <td>
                       <span className={`badge ${STATUS[a.status]?.cls ?? ""}`}>{STATUS[a.status]?.label ?? a.status}</span>
@@ -84,7 +85,7 @@ export default async function SettingsPage({ searchParams }: { searchParams: Pro
                     <td>
                       <div className="toolbar" style={{ justifyContent: "flex-end" }}>
                         {a.status === "reauth_required" ? (
-                          <a className="btn btn-sm btn-primary" href="/api/auth/google/start?intent=connect">Neu verbinden</a>
+                          <a className="btn btn-sm btn-primary" href={a.provider === "gmail" ? "/api/auth/google/start?intent=connect" : "#weitere-postfaecher"}>Neu verbinden</a>
                         ) : (
                           <ActionButton action={syncNowAction.bind(null, a.id)} title="Jetzt synchronisieren"><Icon name="refresh" size={14} /></ActionButton>
                         )}
@@ -108,6 +109,17 @@ export default async function SettingsPage({ searchParams }: { searchParams: Pro
             Microsoft 365/Outlook, iCloud, GMX, WEB.DE und IMAP-Konten folgen in einer späteren Ausbaustufe. Senden erfolgt in jeder Stufe nur nach deiner ausdrücklichen Freigabe;
             Papierkorb-Aktionen brauchen eine gesonderte Bestätigung, dauerhaftes Löschen ist ausgeschlossen.
           </p>
+        </section>
+
+        <section className="card card-pad" id="weitere-postfaecher">
+          <div className="card-head">
+            <span className="head-icon"><Icon name="inbox" /></span>
+            <div>
+              <h2>Weiteres Postfach verbinden</h2>
+              <p>GMX, WEB.DE, T-Online, iCloud, Yahoo, IONOS, STRATO oder eigene Domain über IMAP/SMTP.</p>
+            </div>
+          </div>
+          <ImapConnectForm />
         </section>
 
         <section id="signaturen">

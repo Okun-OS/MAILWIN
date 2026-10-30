@@ -3,6 +3,8 @@ import { db, schema } from "../db";
 import { decrypt, encrypt } from "../crypto";
 import { oauthClient } from "../auth/google-oauth";
 import { GmailProvider } from "./gmail";
+import { ImapProvider } from "./imap";
+import type { ImapSettings } from "./imap-presets";
 import { ReauthRequiredError, type MailProvider } from "./types";
 
 export type Account = typeof schema.connectedAccounts.$inferSelect;
@@ -41,6 +43,9 @@ function defaultProviderFactory(account: Account): MailProvider {
   switch (account.provider) {
     case "gmail":
       return new GmailProvider(googleAuthFor(account));
+    case "imap":
+      if (!account.credentialsEnc) throw new ReauthRequiredError();
+      return new ImapProvider(account.settings as unknown as ImapSettings, decrypt(account.credentialsEnc), account.emailAddress);
     default:
       throw new Error(`Anbieter ${account.provider} ist noch nicht angebunden (geplant für Phase 5).`);
   }

@@ -22,6 +22,20 @@
       "when": 1793369872100,
       "tag": "0002_admin_extras",
       "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "7",
+      "when": 1793370618530,
+      "tag": "0003_imap_settings",
+      "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1793370948655,
+      "tag": "0004_email_references",
+      "breakpoints": true
     }
   ]
 }
