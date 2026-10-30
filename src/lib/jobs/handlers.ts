@@ -1,7 +1,7 @@
 import { eq } from "drizzle-orm";
 import { db, schema } from "../db";
 import { syncAccount } from "../mail/sync";
-import { syncGoogleCalendar } from "../calendar/google";
+import { syncGoogleCalendar, syncMicrosoftCalendar } from "../calendar/google";
 import { ReauthRequiredError } from "../mail/types";
 import { enqueue, type Job } from "./queue";
 
@@ -13,7 +13,10 @@ export const handlers: Record<string, (job: Job) => Promise<void>> = {
     if (!account || account.status === "disconnected" || account.status === "reauth_required") return;
     try {
       await syncAccount(account);
-      if (account.calendarEnabled) await syncGoogleCalendar(account);
+      if (account.calendarEnabled) {
+        if (account.provider === "gmail") await syncGoogleCalendar(account);
+        if (account.provider === "microsoft") await syncMicrosoftCalendar(account);
+      }
     } catch (err) {
       // Abgelaufene Zugänge nicht endlos wiederholen – der Nutzer wurde benachrichtigt
       if (err instanceof ReauthRequiredError) throw new PermanentJobError(err.message);

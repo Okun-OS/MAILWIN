@@ -44,8 +44,16 @@ export default async function SettingsPage({ searchParams }: { searchParams: Pro
         </div>
       </div>
       {sp.verbunden && <div className="notice" style={{ marginBottom: 16 }}>Konto verbunden. Die erste Synchronisation läuft im Hintergrund.</div>}
-      {sp.fehler === "weitere_postfaecher" && (
-        <div className="notice error" style={{ marginBottom: 16 }}>Weitere Postfächer sind in deinem Tarif nicht freigeschaltet. Bitte wende dich an den Support.</div>
+      {sp.fehler && (
+        <div className="notice error" style={{ marginBottom: 16 }}>
+          {{
+            weitere_postfaecher: "Weitere Postfächer sind in deinem Tarif nicht freigeschaltet. Bitte wende dich an den Support.",
+            microsoft_nicht_konfiguriert: "Die Microsoft-Anbindung ist auf diesem Server noch nicht eingerichtet.",
+            microsoft_abgelehnt: "Du hast den Zugriff bei Microsoft abgelehnt.",
+            microsoft_sitzung: "Die Anmeldung bei Microsoft hat zu lange gedauert. Bitte noch einmal versuchen.",
+            microsoft_fehler: "Die Verbindung mit Microsoft ist fehlgeschlagen. Bitte noch einmal versuchen.",
+          }[sp.fehler] ?? "Das hat nicht geklappt."}
+        </div>
       )}
 
       <div className="stack">
@@ -54,12 +62,17 @@ export default async function SettingsPage({ searchParams }: { searchParams: Pro
             <span className="head-icon"><Icon name="mail" /></span>
             <div>
               <h2>E-Mail-Konten</h2>
-              <p>Zugriff per OAuth – Passwörter werden nie gespeichert, Zugangstoken nur verschlüsselt.</p>
+              <p>Gmail und Microsoft per OAuth, andere Anbieter per IMAP. Zugangsdaten werden nur verschlüsselt gespeichert.</p>
             </div>
             <div className="end">
               {integrations.google && (
                 <a className="btn btn-primary btn-sm" href="/api/auth/google/start?intent=connect">
-                  <Icon name="plus" size={14} /> Gmail-Konto verbinden
+                  <Icon name="plus" size={14} /> Gmail verbinden
+                </a>
+              )}
+              {integrations.microsoft && (
+                <a className="btn btn-sm" href="/api/auth/microsoft/start">
+                  <Icon name="plus" size={14} /> Microsoft 365 / Outlook verbinden
                 </a>
               )}
             </div>
@@ -85,7 +98,7 @@ export default async function SettingsPage({ searchParams }: { searchParams: Pro
                     <td>
                       <div className="toolbar" style={{ justifyContent: "flex-end" }}>
                         {a.status === "reauth_required" ? (
-                          <a className="btn btn-sm btn-primary" href={a.provider === "gmail" ? "/api/auth/google/start?intent=connect" : "#weitere-postfaecher"}>Neu verbinden</a>
+                          <a className="btn btn-sm btn-primary" href={a.provider === "gmail" ? "/api/auth/google/start?intent=connect" : a.provider === "microsoft" ? "/api/auth/microsoft/start" : "#weitere-postfaecher"}>Neu verbinden</a>
                         ) : (
                           <ActionButton action={syncNowAction.bind(null, a.id)} title="Jetzt synchronisieren"><Icon name="refresh" size={14} /></ActionButton>
                         )}
@@ -103,11 +116,11 @@ export default async function SettingsPage({ searchParams }: { searchParams: Pro
               </tbody>
             </table>
           ) : (
-            <div className="empty"><b>Noch kein Konto verbunden</b>Verbinde dein Gmail- oder Google-Workspace-Konto.</div>
+            <div className="empty"><b>Noch kein Konto verbunden</b>Verbinde Gmail, Microsoft 365/Outlook oder ein anderes Postfach über IMAP.</div>
           )}
           <p className="small muted" style={{ marginBottom: 0 }}>
-            Microsoft 365/Outlook, iCloud, GMX, WEB.DE und IMAP-Konten folgen in einer späteren Ausbaustufe. Senden erfolgt in jeder Stufe nur nach deiner ausdrücklichen Freigabe;
-            Papierkorb-Aktionen brauchen eine gesonderte Bestätigung, dauerhaftes Löschen ist ausgeschlossen.
+            Senden erfolgt in jeder Stufe nur nach deiner ausdrücklichen Freigabe; Papierkorb-Aktionen brauchen eine gesonderte Bestätigung, dauerhaftes Löschen ist
+            ausgeschlossen.
           </p>
         </section>
 

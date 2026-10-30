@@ -11,11 +11,22 @@ import { enqueue } from "@/lib/jobs/queue";
 import { ImapProvider } from "@/lib/mail/imap";
 import { PRESETS, type ImapSettings } from "@/lib/mail/imap-presets";
 
-export type MailboxState = { error?: string; message?: string } | null;
+export type MailboxState = { error?: string; message?: string; values?: Record<string, string> } | null;
 
 /** Verbindet ein IMAP/SMTP-Postfach. Die Zugangsdaten werden vor dem Speichern am Server geprüft. */
 export async function connectImapAction(_prev: MailboxState, form: FormData): Promise<MailboxState> {
   const user = await requireUser();
+  const result = await connect(user, form);
+  // Eingaben (ohne Passwort) zurückgeben, damit das Formular nach einem Fehler nicht leer ist
+  if (result?.error) {
+    const values: Record<string, string> = {};
+    for (const k of ["preset", "email", "username", "imapHost", "imapPort", "smtpHost", "smtpPort"]) values[k] = String(form.get(k) ?? "");
+    return { ...result, values };
+  }
+  return result;
+}
+
+async function connect(user: Awaited<ReturnType<typeof requireUser>>, form: FormData): Promise<MailboxState> {
   const email = String(form.get("email") ?? "").trim().toLowerCase();
   const password = String(form.get("password") ?? "");
   if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) return { error: "Bitte eine gültige E-Mail-Adresse angeben." };

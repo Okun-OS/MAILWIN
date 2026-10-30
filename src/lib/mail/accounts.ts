@@ -4,6 +4,8 @@ import { decrypt, encrypt } from "../crypto";
 import { oauthClient } from "../auth/google-oauth";
 import { GmailProvider } from "./gmail";
 import { ImapProvider } from "./imap";
+import { MicrosoftProvider } from "./microsoft";
+import { MicrosoftAuthError, refreshMicrosoftToken } from "../auth/microsoft-oauth";
 import type { ImapSettings } from "./imap-presets";
 import { ReauthRequiredError, type MailProvider } from "./types";
 
@@ -39,10 +41,37 @@ export function googleAuthFor(account: Account) {
   return client;
 }
 
+/** Liefert ein gültiges Microsoft-Zugangstoken; erneuert es bei Bedarf und speichert das neue (rotierende) Refresh-Token. */
+export function microsoftTokenGetter(account: Account): () => Promise<string> {
+  let access = account.accessTokenEnc ? decrypt(account.accessTokenEnc) : null;
+  let expires = account.tokenExpiresAt?.getTime() ?? 0;
+  let refresh = account.refreshTokenEnc ? decrypt(account.refreshTokenEnc) : null;
+  return async () => {
+    if (access && expires - Date.now() > 120_000) return access;
+    if (!refresh) throw new ReauthRequiredError();
+    try {
+      const t = await refreshMicrosoftToken(refresh);
+      access = t.access_token;
+      expires = Date.now() + t.expires_in * 1000;
+      refresh = t.refresh_token ?? refresh;
+      await db
+        .update(schema.connectedAccounts)
+        .set({ accessTokenEnc: encrypt(access), refreshTokenEnc: encrypt(refresh), tokenExpiresAt: new Date(expires), updatedAt: new Date() })
+        .where(eq(schema.connectedAccounts.id, account.id));
+      return access;
+    } catch (err) {
+      if (err instanceof MicrosoftAuthError && ["invalid_grant", "interaction_required", "consent_required"].includes(err.code)) throw new ReauthRequiredError();
+      throw err;
+    }
+  };
+}
+
 function defaultProviderFactory(account: Account): MailProvider {
   switch (account.provider) {
     case "gmail":
       return new GmailProvider(googleAuthFor(account));
+    case "microsoft":
+      return new MicrosoftProvider(microsoftTokenGetter(account));
     case "imap":
       if (!account.credentialsEnc) throw new ReauthRequiredError();
       return new ImapProvider(account.settings as unknown as ImapSettings, decrypt(account.credentialsEnc), account.emailAddress);

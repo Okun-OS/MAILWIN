@@ -19,6 +19,10 @@ const schema = z.object({
   TWILIO_ACCOUNT_SID: z.string().optional(),
   TWILIO_AUTH_TOKEN: z.string().optional(),
   TWILIO_FROM: z.string().optional(),
+  // Microsoft 365 / Outlook (App-Registrierung in Microsoft Entra ID)
+  MICROSOFT_CLIENT_ID: z.string().optional(),
+  MICROSOFT_CLIENT_SECRET: z.string().optional(),
+  MICROSOFT_TENANT: z.string().default("common"),
 });
 
 // Leere Werte (z. B. in Hosting-Oberflächen angelegt, aber nicht befüllt) gelten als nicht gesetzt
@@ -36,6 +40,7 @@ export function requireEnv<K extends keyof typeof env>(key: K): NonNullable<(typ
 export const integrations = {
   google: Boolean(env.GOOGLE_CLIENT_ID && env.GOOGLE_CLIENT_SECRET),
   marvin: Boolean(env.ANTHROPIC_API_KEY),
+  microsoft: Boolean(env.MICROSOFT_CLIENT_ID && env.MICROSOFT_CLIENT_SECRET),
 };
 
 /**

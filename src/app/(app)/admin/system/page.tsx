@@ -20,6 +20,7 @@ export default async function SystemPage() {
   ]);
   const services = [
     { name: "Google (Anmeldung, Gmail, Kalender)", ok: integrations.google },
+    { name: "Microsoft 365 / Outlook", ok: integrations.microsoft },
     { name: "Marvin (Claude API)", ok: integrations.marvin },
     { name: "E-Mail-Versand (Resend)", ok: channels.email },
     { name: "SMS-Versand (Twilio)", ok: channels.sms },

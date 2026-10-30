@@ -49,3 +49,39 @@ export async function syncGoogleCalendar(account: Account): Promise<number> {
     );
   return items.length;
 }
+
+/** Termine aus Microsoft 365 / Outlook (gleiches Zeitfenster wie bei Google). */
+export async function syncMicrosoftCalendar(account: Account): Promise<number> {
+  if (account.provider !== "microsoft" || !account.calendarEnabled) return 0;
+  const { MicrosoftProvider } = await import("../mail/microsoft");
+  const { microsoftTokenGetter } = await import("../mail/accounts");
+  const from = new Date(Date.now() - 86_400_000);
+  const to = new Date(Date.now() + 14 * 86_400_000);
+  const items = await new MicrosoftProvider(microsoftTokenGetter(account)).calendarView(from, to);
+  for (const e of items) {
+    const values = {
+      title: e.subject || "(Ohne Titel)",
+      location: e.location?.displayName || null,
+      conferenceProvider: e.onlineMeeting ? "Microsoft Teams" : null,
+      startsAt: new Date(`${e.start.dateTime}Z`),
+      endsAt: new Date(`${e.end.dateTime}Z`),
+      allDay: e.isAllDay,
+    };
+    await db
+      .insert(schema.calendarEvents)
+      .values({ userId: account.userId, accountId: account.id, providerEventId: e.id, ...values })
+      .onConflictDoUpdate({ target: [schema.calendarEvents.accountId, schema.calendarEvents.providerEventId], set: values });
+  }
+  const keep = items.map((e) => e.id);
+  await db
+    .delete(schema.calendarEvents)
+    .where(
+      and(
+        eq(schema.calendarEvents.accountId, account.id),
+        gte(schema.calendarEvents.startsAt, from),
+        lt(schema.calendarEvents.startsAt, to),
+        ...(keep.length ? [notInArray(schema.calendarEvents.providerEventId, keep)] : []),
+      ),
+    );
+  return items.length;
+}
