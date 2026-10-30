@@ -33,6 +33,29 @@ npm run worker            # zweites Terminal: Synchronisation & Hintergrundjobs
 | `ANTHROPIC_API_KEY` | Für Marvin |
 | `APP_URL` | Basis-URL (für OAuth-Redirects) |
 
+## Deployment auf Railway
+
+Mailwin braucht drei Bausteine im selben Railway-Projekt:
+
+1. **PostgreSQL**: über „New → Database → PostgreSQL“ anlegen.
+2. **Web-Service** (dieses Repository):
+   - *Settings → Source*: Branch mit dem Code wählen. **Auf `main` liegt bisher nur `.gitkeep`**, ein Build von dort schlägt fehl.
+   - *Settings → Deploy → Pre-Deploy Command*: `npm run db:migrate`
+   - *Settings → Deploy → Healthcheck Path*: `/api/health`
+   - Start und Build erkennt Railpack automatisch (`npm run build`, `npm start`; `PORT` wird übernommen).
+   - Einen Domain-Namen erzeugen und als `APP_URL` eintragen.
+3. **Worker-Service**: dasselbe Repository und derselbe Branch noch einmal hinzufügen, mit *Custom Start Command* `npm run worker` und ohne Domain. Der Worker synchronisiert die Postfächer, auch wenn niemand die Seite geöffnet hat.
+
+Variablen für **beide** Services (am einfachsten als *Shared Variables*):
+
+| Variable | Wert |
+|---|---|
+| `DATABASE_URL` | `${{Postgres.DATABASE_URL}}` (Referenz auf die Railway-Datenbank) |
+| `ENCRYPTION_KEY` | einmal erzeugen (siehe oben) und **nie wieder ändern**, sonst sind gespeicherte Tokens unlesbar |
+| `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET` | aus der Google Cloud Console; Redirect-URI `https://<deine-domain>/api/auth/google/callback` |
+| `ANTHROPIC_API_KEY` | für Marvin |
+| `APP_URL` | `https://<deine-domain>` |
+
 ## Tests
 
 ```bash

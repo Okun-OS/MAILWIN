@@ -9,7 +9,8 @@ const schema = z.object({
   ANTHROPIC_API_KEY: z.string().optional(),
 });
 
-export const env = schema.parse(process.env);
+// Leere Werte (z. B. in Hosting-Oberflächen angelegt, aber nicht befüllt) gelten als nicht gesetzt
+export const env = schema.parse(Object.fromEntries(Object.entries(process.env).filter(([, v]) => v !== "")));
 
 /** Liefert eine Pflicht-Variable oder wirft eine verständliche Fehlermeldung. */
 export function requireEnv<K extends keyof typeof env>(key: K): NonNullable<(typeof env)[K]> {
