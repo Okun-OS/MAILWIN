@@ -17,9 +17,9 @@ export async function exportUserData(userId: string) {
   const crm = (await db.select().from(schema.integrations).where(eq(schema.integrations.userId, userId))).map(
     ({ apiKeyEnc: _k, webhookSecretEnc: _w, ...rest }) => rest,
   );
-  const crmLinks = crm.length
-    ? await db.select().from(schema.crmThreadLinks).where(inArray(schema.crmThreadLinks.integrationId, crm.map((i) => i.id)))
-    : [];
+  const crmIds = crm.map((i) => i.id);
+  const crmLinks = crmIds.length ? await db.select().from(schema.crmThreadLinks).where(inArray(schema.crmThreadLinks.integrationId, crmIds)) : [];
+  const crmReports = crmIds.length ? await db.select().from(schema.crmSignals).where(inArray(schema.crmSignals.integrationId, crmIds)) : [];
   const conversations = await db.select().from(schema.marvinConversations).where(eq(schema.marvinConversations.userId, userId));
   const messages = [];
   for (const c of conversations) {
@@ -32,6 +32,7 @@ export async function exportUserData(userId: string) {
     emailKonten: accounts,
     crmAnbindungen: crm,
     crmZuordnungen: crmLinks,
+    crmMeldungen: crmReports,
     konversationen: await db.select().from(schema.emailThreads).where(eq(schema.emailThreads.userId, userId)),
     emails: await db.select().from(schema.emails).where(eq(schema.emails.userId, userId)),
     termine: await db.select().from(schema.calendarEvents).where(eq(schema.calendarEvents.userId, userId)),

@@ -4,12 +4,12 @@ Legende: ✅ umgesetzt und getestet · 🟡 umgesetzt, aber nicht gegen den echt
 
 ## Wie getestet wird
 
-- **`npm test`** (68 Tests):
+- **`npm test`** (82 Tests):
   - Unit-Tests: MIME, Gmail-Parser, Verschlüsselung, Passwörter, Einmal-Codes, Zeitzonen.
   - Integrationstests gegen echtes PostgreSQL: Sync, Freigaben, Berechtigungen, Mandantentrennung, Agenten-Loop, Warteschlange, Admin-Start.
   - **IMAP/SMTP gegen einen echten IMAP-Server** (Dovecot) und einen SMTP-Testserver. Der Test läuft nur, wenn `IMAP_TEST_PORT` (Standard 14300) erreichbar ist.
   - Microsoft Graph gegen eine nachgebildete API.
-  - **OKUN CRM** gegen einen Nachbau der Connect API v1 (`tests/crm-mock.ts`, nach `openapi.json` des CRM): Abläufe A–D, Idempotenz, 401/404/422/429, Webhook-Signatur und Duplikate.
+  - **OKUN CRM** gegen einen Nachbau der Connect API 1.3 (`tests/crm-mock.ts`, nach `openapi.json` des CRM): Abläufe A–D, Signale, Aufgaben, Kontaktdaten, Nachfass-Entwurf, alle Webhooks, Idempotenz, 401/404/422/429/503, Signatur und Duplikate; Regeln der Signal-Erkennung (Richtung, Schwelle, wörtliches Zitat, Rückkehrdatum).
 - **Browser:** Login, Pflicht-Passwortwechsel, Admin-Bereich, Kunde anlegen, Kundenlogin, IMAP-Verbindung mit falschem Passwort, CRM verbinden (falscher und richtiger Schlüssel), Lead aus einer Konversation anlegen, signierter und gefälschter Webhook.
 - **Live:** Gmail-Anmeldung und Synchronisation auf okun-mailwin.com.
 - **Nicht gegen echte Dienste getestet:**
@@ -60,7 +60,10 @@ Legende: ✅ umgesetzt und getestet · 🟡 umgesetzt, aber nicht gegen den echt
 | Marvin: `crm_lookup`, `crm_create_lead` (mit Freigabe oder direkt), `crm_link_thread` | ✅ (echte Claude-API ungetestet) |
 | Webhooks: Phase, gewonnen/verloren, Kontaktänderung, Ping, signaturgeprüft | ✅ |
 | Admin: CRM-Status je Kunde, Feature-Schalter, Export ohne Schlüssel | ✅ |
-| v1.2 (Signale, Aufgaben, Lead-Details) | ⬜ wartet auf das CRM, Rückmeldung in `docs/NACHRICHT-OKUN-CRM-V1.2.md` |
+| Signale (Angebot, Zusage/Absage, Termin, Rückfrage, Abwesenheit) mit Erkennung durch Claude, Aufgaben, Kontaktdaten aus Signaturen | ✅ gegen Nachbau · 🟡 echte Claude-API und echte Instanz |
+| Lead-Details für Marvin, nächster Schritt auf der Konversation, Nachfass-Entwurf bei fälligem Schritt | ✅ (echte Claude-API ungetestet) |
+| Webhooks v1.3: Arbeitsbereich, `lead.deleted`, `contact.merged`, `signal.proposal_resolved`, `lead.next_action_changed/_due` | ✅ |
+| Akquise-Antworten (`/outreach/replies`) | ⬜ Vorschlag ans CRM in `docs/NACHRICHT-OKUN-CRM-V1.3.md` |
 
 Doku: `docs/CRM-ANBINDUNG.md`.
 
@@ -76,7 +79,7 @@ Doku: `docs/CRM-ANBINDUNG.md`.
 
 1. Website vor der Anmeldung und Buchung über Stripe (Vorbereitung durch OKUN)
 2. Phase 2: Postfach-Aufräumassistent, Automationsregeln, KI-Priorisierung
-3. CRM: Test gegen die OKUN-CRM-Testinstanz, danach v1.2 (Signale) sowie HubSpot/Pipedrive-Adapter: siehe `docs/CRM-ANBINDUNG.md`
+3. CRM: Test gegen die OKUN-CRM-Testinstanz (`docs/CRM-TESTINSTANZ.md`), Akquise-Antworten, danach HubSpot/Pipedrive-Adapter: siehe `docs/CRM-ANBINDUNG.md`
 4. WhatsApp Business und weitere Kanäle: siehe `docs/KANAELE-UND-CRM.md`
 5. Phase 3/4: Recherchequellen speichern, Antwortüberwachung, Follow-ups
 6. Gmail-Push statt Polling, Streaming von Marvins Antworten

@@ -1,9 +1,10 @@
 import { createHmac, timingSafeEqual } from "node:crypto";
-import { and, eq, inArray, isNull, lt, lte, or, sql } from "drizzle-orm";
+import { and, desc, eq, inArray, isNull, lt, lte, or, sql } from "drizzle-orm";
 import { z } from "zod";
 import { db, schema } from "../db";
 import { decrypt } from "../crypto";
-import type { Integration } from "./service";
+import { enqueue } from "../jobs/queue";
+import { detachLead, type Integration } from "./service";
 
 /** Zeitfenster gegen Wiederholungsangriffe (Übergabe: 5 Minuten). */
 export const MAX_SKEW_SECONDS = 300;
@@ -39,6 +40,15 @@ const contactEvent = z.object({
   contact: z.object({ id: z.string(), name: z.string().nullish(), email: z.string().nullish(), url: z.string().nullish() }).passthrough(),
   changed: z.array(z.string()).default([]),
 });
+const contactMerged = z.object({ fromId: z.string(), intoId: z.string(), contact: contactEvent.shape.contact.nullish() });
+const nextActionEvent = z.object({
+  lead: leadEvent.shape.lead,
+  nextAction: z
+    .object({ id: z.string().nullish(), type: z.string(), title: z.string(), reason: z.string().nullish(), dueAt: z.string().nullish(), operationalState: z.string().nullish() })
+    .passthrough()
+    .nullable(),
+});
+const proposalResolved = z.object({ proposalId: z.string(), kind: z.string(), accepted: z.boolean(), signal: z.string().nullish(), externalId: z.string().nullish(), resolvedAt: z.string() });
 const envelope = z.object({ id: z.string().min(1).max(200), type: z.string(), occurredAt: z.string(), data: z.unknown() });
 
 export type WebhookResult = { status: number; body: Record<string, unknown> };
@@ -47,8 +57,8 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 /**
  * Nimmt ein Webhook des OKUN CRM an (Ablauf D).
- * Gesucht wird die Integration, deren Geheimnis die Signatur bestätigt – mit `?i=<id>` direkt, sonst unter allen
- * Integrationen mit hinterlegtem Geheimnis (die Standard-URL des CRM enthält keine Kennung).
+ * Gesucht wird die Integration, deren Geheimnis die Signatur bestätigt – mit `?i=<id>` direkt, sonst über den
+ * Arbeitsbereich aus `X-Okun-Workspace` (v1.3) und notfalls unter allen Integrationen mit hinterlegtem Geheimnis.
  */
 export async function receiveWebhook(rawBody: string, headers: Headers, integrationHint: string | null): Promise<WebhookResult> {
   const timestamp = headers.get("x-okun-timestamp") ?? "";
@@ -60,7 +70,13 @@ export async function receiveWebhook(rawBody: string, headers: Headers, integrat
     if (!UUID.test(integrationHint)) return { status: 401, body: { error: "invalid_signature" } };
     conds.push(eq(schema.integrations.id, integrationHint));
   }
-  const candidates = await db.select().from(schema.integrations).where(and(...conds));
+  // v1.3: Arbeitsbereich im Header – nur zur Vorauswahl, entscheidend bleibt die Signatur
+  const workspace = headers.get("x-okun-workspace");
+  let candidates = await db
+    .select()
+    .from(schema.integrations)
+    .where(and(...conds, ...(workspace && !integrationHint ? [eq(schema.integrations.workspaceId, workspace)] : [])));
+  if (!candidates.length && workspace && !integrationHint) candidates = await db.select().from(schema.integrations).where(and(...conds));
   const verified = candidates.filter((i) => {
     try {
       return verifyWebhookSignature(rawBody, timestamp, signature, decrypt(i.webhookSecretEnc!));
@@ -109,6 +125,16 @@ async function applyEvent(integration: Integration, type: string, data: unknown,
       return applyLeadEvent(integration, type, leadEvent.parse(data), occurredAt);
     case "contact.updated":
       return applyContactEvent(integration, contactEvent.parse(data));
+    case "contact.merged":
+      return applyContactMerged(integration, contactMerged.parse(data));
+    case "lead.deleted":
+      return applyLeadDeleted(integration, z.object({ id: z.string() }).parse(data));
+    case "lead.next_action_changed":
+      return applyNextActionChanged(integration, nextActionEvent.parse(data), occurredAt);
+    case "lead.next_action_due":
+      return applyNextActionDue(integration, nextActionEvent.parse(data));
+    case "signal.proposal_resolved":
+      return applyProposalResolved(integration, proposalResolved.parse(data));
     default:
       // ping und künftige Ereignisse: annehmen, nichts tun
       return;
@@ -172,6 +198,99 @@ async function applyContactEvent(integration: Integration, data: z.infer<typeof 
       .set({ name: contact.name })
       .where(and(eq(schema.contacts.userId, integration.userId), sql`lower(${schema.contacts.email}) = ${contact.email.toLowerCase()}`));
   }
+}
+
+async function applyContactMerged(integration: Integration, data: z.infer<typeof contactMerged>) {
+  // fromId gibt es danach nicht mehr – Zuordnungen hängen ab jetzt am verbleibenden Kontakt
+  await db
+    .update(schema.crmThreadLinks)
+    .set({ contactId: data.intoId, ...(data.contact ? { contactName: data.contact.name ?? null, contactUrl: data.contact.url ?? null } : {}), updatedAt: new Date() })
+    .where(and(eq(schema.crmThreadLinks.integrationId, integration.id), eq(schema.crmThreadLinks.contactId, data.fromId)));
+  await db
+    .update(schema.crmSignals)
+    .set({ payload: sql`jsonb_set(${schema.crmSignals.payload}, '{contactId}', to_jsonb(${data.intoId}::text))` })
+    .where(and(eq(schema.crmSignals.integrationId, integration.id), sql`${schema.crmSignals.sentAt} is null`, sql`${schema.crmSignals.payload}->>'contactId' = ${data.fromId}`));
+}
+
+async function applyLeadDeleted(integration: Integration, data: { id: string }) {
+  const [link] = await db.select().from(schema.crmThreadLinks).where(and(eq(schema.crmThreadLinks.integrationId, integration.id), eq(schema.crmThreadLinks.leadId, data.id)));
+  const count = await detachLead(integration.id, data.id, "deleted_in_crm");
+  // Noch nicht gesendete Meldungen zu diesem Lead verwerfen
+  await db
+    .update(schema.crmSignals)
+    .set({ error: "not_found: Lead im CRM gelöscht" })
+    .where(and(eq(schema.crmSignals.integrationId, integration.id), eq(schema.crmSignals.leadId, data.id), sql`${schema.crmSignals.sentAt} is null`));
+  if (count) {
+    await db.insert(schema.notifications).values({
+      userId: integration.userId,
+      kind: "crm_update",
+      priority: "low",
+      title: `Lead im CRM gelöscht: ${link?.leadTitle ?? "Lead"}`,
+      body: "Die Konversation ist jetzt nur noch dem Kontakt zugeordnet.",
+      link: `/emails/${link!.threadId}`,
+    });
+  }
+}
+
+async function applyNextActionChanged(integration: Integration, data: z.infer<typeof nextActionEvent>, occurredAt: Date) {
+  const { lead, nextAction } = data;
+  const notOlder = or(isNull(schema.crmThreadLinks.leadEventAt), lte(schema.crmThreadLinks.leadEventAt, occurredAt));
+  await db
+    .update(schema.crmThreadLinks)
+    .set({
+      leadTitle: lead.title,
+      leadStage: lead.stage.name,
+      leadStatus: lead.status,
+      nextActionType: nextAction?.type ?? null,
+      nextActionTitle: nextAction?.title ?? null,
+      nextActionDueAt: nextAction?.dueAt ? new Date(nextAction.dueAt) : null,
+      operationalState: nextAction?.operationalState ?? null,
+      leadEventAt: occurredAt,
+      updatedAt: new Date(),
+    })
+    .where(and(eq(schema.crmThreadLinks.integrationId, integration.id), eq(schema.crmThreadLinks.leadId, lead.id), notOlder));
+}
+
+/** Fälliger Schritt mit Kundenkontakt → Nachfass-Entwurf zur Freigabe in der zuletzt aktiven zugeordneten Konversation. */
+async function applyNextActionDue(integration: Integration, data: z.infer<typeof nextActionEvent>) {
+  const { lead, nextAction } = data;
+  if (!nextAction) return;
+  const [target] = await db
+    .select({ threadId: schema.crmThreadLinks.threadId })
+    .from(schema.crmThreadLinks)
+    .innerJoin(schema.emailThreads, eq(schema.emailThreads.id, schema.crmThreadLinks.threadId))
+    .where(and(eq(schema.crmThreadLinks.integrationId, integration.id), eq(schema.crmThreadLinks.leadId, lead.id)))
+    .orderBy(desc(schema.emailThreads.lastMessageAt))
+    .limit(1);
+  if (!target) {
+    await db.insert(schema.notifications).values({
+      userId: integration.userId,
+      kind: "crm_update",
+      priority: "normal",
+      title: `Im CRM fällig: ${nextAction.title}`,
+      body: `${lead.title}${nextAction.reason ? ` – ${nextAction.reason}` : ""}. In Mailwin ist dem Lead keine Konversation zugeordnet.`,
+      link: lead.url ?? null,
+    });
+    return;
+  }
+  await enqueue(
+    "crm_followup_draft",
+    { integrationId: integration.id, threadId: target.threadId, leadId: lead.id, leadTitle: lead.title, action: { type: nextAction.type, title: nextAction.title, reason: nextAction.reason ?? null, dueAt: nextAction.dueAt ?? null } },
+    { dedupeKey: `crm-due:${integration.id}:${nextAction.id ?? nextAction.type}:${nextAction.dueAt ?? ""}` },
+  );
+}
+
+/** Rückkanal: Ein Mensch hat im CRM einen Vorschlag aus Mailwin übernommen oder verworfen. */
+async function applyProposalResolved(integration: Integration, data: z.infer<typeof proposalResolved>) {
+  const [row] = await db
+    .select()
+    .from(schema.crmSignals)
+    .where(and(eq(schema.crmSignals.integrationId, integration.id), sql`${schema.crmSignals.proposals} @> ${JSON.stringify([{ id: data.proposalId }])}::jsonb`));
+  if (!row) return;
+  await db
+    .update(schema.crmSignals)
+    .set({ proposals: row.proposals.map((p) => (p.id === data.proposalId ? { ...p, accepted: data.accepted, resolvedAt: data.resolvedAt } : p)) })
+    .where(eq(schema.crmSignals.id, row.id));
 }
 
 /** Alte Ereignis-IDs aufräumen: Das CRM wiederholt höchstens 24 Stunden lang. */

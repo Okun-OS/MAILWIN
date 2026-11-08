@@ -1,4 +1,6 @@
 import Link from "next/link";
+import { and, desc, eq } from "drizzle-orm";
+import { db, schema } from "@/lib/db";
 import { connectorFor, lookupThread, threadCounterpart } from "@/lib/crm/service";
 import type { CrmPipeline } from "@/lib/crm/types";
 import { CrmLinkButton } from "./CrmLinkButton";
@@ -24,8 +26,78 @@ function Shell({ children, end }: { children: React.ReactNode; end?: React.React
   );
 }
 
+const SIGNAL_LABEL: Record<string, string> = {
+  offer_sent: "Angebot verschickt",
+  offer_accepted: "Angebot angenommen",
+  offer_declined: "Absage",
+  meeting_requested: "Terminwunsch",
+  meeting_booked: "Termin bestätigt",
+  question: "Rückfrage",
+  out_of_office: "Abwesenheitsnotiz",
+  contract_sent: "Vertrag verschickt",
+  contract_accepted: "Vertrag unterschrieben",
+  task: "Aufgabe",
+  contact_details: "Kontaktdaten",
+};
+
+const APPLIED_LABEL: Record<string, string> = {
+  value_updated: "Wert übernommen",
+  offer_follow_up: "Nachfassen geplant",
+  meeting_created: "Termin eingetragen",
+  next_action_set: "nächster Schritt gesetzt",
+  automation_paused: "Nachfassen pausiert",
+  won: "gewonnen",
+  lost: "verloren",
+  task_created: "Aufgabe angelegt",
+  task_exists: "Aufgabe gab es schon",
+};
+
+function appliedText(applied: string[]) {
+  return applied
+    .filter((a) => a !== "timeline")
+    .map((a) => (a.startsWith("stage_changed:") ? `Phase → ${a.slice(14)}` : a.startsWith("filled:") ? `${a.slice(7)} ergänzt` : (APPLIED_LABEL[a] ?? a)))
+    .join(", ");
+}
+
+/** Was Mailwin aus den Nachrichten erkannt und dem CRM gemeldet hat – mit der Antwort des CRM. */
+async function SignalList({ threadId, integrationId, timezone }: { threadId: string; integrationId: string; timezone: string }) {
+  const rows = await db
+    .select()
+    .from(schema.crmSignals)
+    .where(and(eq(schema.crmSignals.threadId, threadId), eq(schema.crmSignals.integrationId, integrationId)))
+    .orderBy(desc(schema.crmSignals.createdAt))
+    .limit(5);
+  if (!rows.length) return null;
+  return (
+    <div style={{ marginTop: 12 }}>
+      <div className="small muted" style={{ marginBottom: 6 }}>Erkannt und ans CRM gemeldet</div>
+      <ul className="small" style={{ margin: 0, paddingLeft: 18, display: "grid", gap: 4 }}>
+        {rows.map((r) => {
+          const result = r.error
+            ? `nicht übernommen (${r.error})`
+            : !r.sentAt
+              ? "wird gemeldet …"
+              : [
+                  appliedText(r.applied),
+                  ...r.proposals.map((p) => `Vorschlag „${p.title}“${p.accepted === true ? " übernommen" : p.accepted === false ? " verworfen" : " wartet im CRM"}`),
+                  r.nextActionTitle ? `nächster Schritt: ${r.nextActionTitle}${r.nextActionDueAt ? ` am ${r.nextActionDueAt.toLocaleDateString("de-DE", { timeZone: timezone })}` : ""}` : "",
+                ]
+                  .filter(Boolean)
+                  .join(" · ") || "im CRM vermerkt";
+          return (
+            <li key={r.id} title={r.quote ?? undefined}>
+              <b>{SIGNAL_LABEL[r.signal] ?? r.signal}</b>
+              {r.confidence != null && r.signal !== "out_of_office" ? <span className="muted"> ({Math.round(r.confidence * 100)} %)</span> : null} – {result}
+            </li>
+          );
+        })}
+      </ul>
+    </div>
+  );
+}
+
 /** CRM-Karte einer Konversation: Kontakt, offene Leads, Zuordnung, „Als Lead anlegen“. */
-export async function CrmCard({ userId, threadId, subject }: { userId: string; threadId: string; subject: string | null }) {
+export async function CrmCard({ userId, threadId, subject, timezone = "Europe/Berlin" }: { userId: string; threadId: string; subject: string | null; timezone?: string }) {
   let view: Awaited<ReturnType<typeof lookupThread>>;
   try {
     view = await lookupThread(userId, threadId);
@@ -63,6 +135,13 @@ export async function CrmCard({ userId, threadId, subject }: { userId: string; t
           {integration.settings.logMode === "off" ? "Nachrichten werden nicht übertragen" : "Nachrichten dieser Konversation werden am Lead protokolliert"}
           {link.linkedBy === "auto" ? " · automatisch zugeordnet" : link.linkedBy === "marvin" ? " · von Marvin zugeordnet" : ""}
         </p>
+        {link.nextActionTitle && link.leadStatus !== "won" && link.leadStatus !== "lost" && (
+          <p className="small" style={{ margin: "8px 0 0" }}>
+            Nächster Schritt im CRM: <b>{link.nextActionTitle}</b>
+            {link.nextActionDueAt ? ` · fällig ${link.nextActionDueAt.toLocaleDateString("de-DE", { timeZone: timezone, dateStyle: "medium" })}` : ""}
+          </p>
+        )}
+        <SignalList threadId={threadId} integrationId={integration.id} timezone={timezone} />
         <div style={{ marginTop: 10 }}>
           <CrmLinkButton threadId={threadId} op="unlink" confirm="Zuordnung lösen? Bereits übertragene Nachrichten bleiben im CRM." className="btn btn-sm btn-ghost">
             Zuordnung lösen

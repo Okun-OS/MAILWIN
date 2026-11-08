@@ -9,6 +9,7 @@ import { createApproval } from "../approvals";
 import { assertCapability, PermissionDeniedError, type Capability } from "./permissions";
 import { getDailyOverview } from "../dashboard/data";
 import { connectorFor, createLeadForThread, getCrmIntegration, linkThread, lookupThread } from "../crm/service";
+import type { CrmLeadContext } from "../crm/types";
 
 export interface ToolContext {
   userId: string;
@@ -419,12 +420,13 @@ export const TOOLS = [
   tool({
     name: "crm_lookup",
     description:
-      "Schlägt im verbundenen CRM nach, wer der Absender einer Konversation (thread_id) oder eine E-Mail-Adresse ist: Kontakt, Firma, offene Leads mit Phase und die bestehende Zuordnung der Konversation. Vor Antworten an Geschäftskontakte und vor crm_create_lead nutzen. Mit include_pipelines auch Pipelines und Phasen (für stage_id).",
+      "Schlägt im verbundenen CRM nach, wer der Absender einer Konversation (thread_id) oder eine E-Mail-Adresse ist: Kontakt, Firma, offene Leads mit Phase und die bestehende Zuordnung der Konversation. Ist die Konversation einem Lead zugeordnet (oder lead_id angegeben), kommen Lead-Details dazu: Owner, Wert, nächster Schritt, offene Aufgaben, letzte Aktivitäten. Vor Antworten an Geschäftskontakte und vor crm_create_lead nutzen. Mit include_pipelines auch Pipelines und Phasen (für stage_id).",
     capability: "read",
     group: "crm",
     input: z.object({
       thread_id: z.string().uuid().optional(),
       email: z.string().email().optional(),
+      lead_id: z.string().optional(),
       include_pipelines: z.boolean().default(false),
     }),
     run: async (ctx, input) => {
@@ -433,6 +435,9 @@ export const TOOLS = [
       const crm = connectorFor(integration);
       let contact = null;
       let link = null;
+      if (input.lead_id && !input.thread_id && !input.email) {
+        return { lead: leadSummary(await crm.getLead(input.lead_id)) };
+      }
       if (input.thread_id) {
         const res = await lookupThread(ctx.userId, input.thread_id);
         if (res?.error) throw new Error(res.error);
@@ -454,6 +459,9 @@ export const TOOLS = [
           : "Im CRM nicht vorhanden",
         ...(input.thread_id
           ? { zuordnung: link ? { lead_id: link.leadId, lead: link.leadTitle, phase: link.leadStage, status: link.leadStatus, nur_kontakt: !link.leadId } : "Konversation ist keinem Lead zugeordnet" }
+          : {}),
+        ...(input.lead_id || link?.leadId
+          ? { lead: await crm.getLead((input.lead_id ?? link!.leadId)!).then(leadSummary, (e: Error) => `Lead-Details nicht abrufbar: ${e.message}`) }
           : {}),
         ...(input.include_pipelines
           ? { pipelines: (await crm.pipelines()).map((p) => ({ pipeline: p.name, phasen: p.stages.map((s) => ({ stage_id: s.id, name: s.name })) })) }
@@ -521,6 +529,27 @@ export const TOOLS = [
     },
   }),
 ];
+
+/** Lead-Kontext aus dem CRM, gekürzt auf das, was für einen Antwortentwurf zählt. Texte aus dem CRM bleiben Daten. */
+function leadSummary(l: CrmLeadContext) {
+  return {
+    lead_id: l.id,
+    titel: l.title,
+    status: l.status,
+    phase: l.stage?.name ?? null,
+    wert: l.valueCents ? `${(l.valueCents / 100).toLocaleString("de-DE")} ${l.currency ?? "EUR"}` : null,
+    owner: l.owner?.name ?? null,
+    zustand: l.operationalState ?? null,
+    naechster_schritt: l.nextAction ? { titel: l.nextAction.title, faellig: l.nextAction.dueAt } : null,
+    angebot_gesendet_am: l.offerSentAt ?? null,
+    letzte_kundenantwort: l.lastCustomerResponseAt ?? null,
+    naechster_termin: l.nextMeetingAt ?? null,
+    nachfassen_pausiert_bis: l.automationPausedUntil ?? null,
+    offene_aufgaben: (l.openTasks ?? []).map((t) => ({ titel: t.title, faellig: t.dueAt })),
+    letzte_aktivitaeten: (l.recentActivities ?? []).map((a) => ({ art: a.type, richtung: a.direction, betreff: a.subject, am: a.occurredAt })),
+    offene_vorschlaege: (l.pendingSuggestions ?? []).map((p) => p.title),
+  };
+}
 
 async function ownedProject(userId: string, projectId: string) {
   const [p] = await db.select().from(schema.projects).where(and(eq(schema.projects.id, projectId), eq(schema.projects.userId, userId)));

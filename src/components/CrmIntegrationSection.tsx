@@ -86,6 +86,18 @@ function SettingsForm({ settings }: { settings: CrmSettings }) {
           </select>
         </div>
       </div>
+      <div className="field">
+        <label>Signale erkennen und ans CRM melden</label>
+        <select className="select" name="signals" defaultValue={settings.signals ?? "on"}>
+          <option value="on">An: Angebot, Zusage/Absage, Termin, Rückfrage, Abwesenheit, Rückruf-Bitten, Kontaktdaten</option>
+          <option value="off">Aus: nur Nachrichten protokollieren</option>
+        </select>
+        <small className="muted">
+          Nur für Konversationen, die einem Lead zugeordnet sind. Marvin ordnet eingehende Nachrichten und ausgehende Mails mit Angebot oder Vertrag ein und meldet
+          ab 60 % Verlässlichkeit, jeweils mit einem kurzen wörtlichen Zitat. Was daraus folgt (Phase, Nachfassen, Vorschlag „Gewonnen?“), entscheidet das CRM nach
+          seinen Einstellungen. Gewonnen und Verloren werden standardmäßig nur vorgeschlagen.
+        </small>
+      </div>
       <button className="btn btn-sm" disabled={pending}>{pending ? "Speichert …" : "Einstellungen speichern"}</button>
     </form>
   );

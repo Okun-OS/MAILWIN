@@ -5,6 +5,7 @@ import { syncGoogleCalendar, syncMicrosoftCalendar } from "../calendar/google";
 import { ReauthRequiredError } from "../mail/types";
 import { enqueue, type Job } from "./queue";
 import { processThreadForCrm } from "../crm/service";
+import { prepareFollowUp, type FollowUpJob } from "../crm/followup";
 import { CrmError } from "../crm/types";
 
 export class PermanentJobError extends Error {}
@@ -34,6 +35,10 @@ export const handlers: Record<string, (job: Job) => Promise<void>> = {
       if (err instanceof CrmError && !err.retryable) throw new PermanentJobError(`${err.code}: ${err.message}`);
       throw err;
     }
+  },
+
+  async crm_followup_draft(job) {
+    await prepareFollowUp(job.payload as unknown as FollowUpJob);
   },
 };
 

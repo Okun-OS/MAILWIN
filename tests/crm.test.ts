@@ -4,11 +4,15 @@ import { db, schema } from "@/lib/db";
 import { encrypt } from "@/lib/crypto";
 import { setProviderFactory } from "@/lib/mail/accounts";
 import { syncAccount } from "@/lib/mail/sync";
-import { claimNext } from "@/lib/jobs/queue";
+import { claimNext, complete } from "@/lib/jobs/queue";
 import { handlers, PermanentJobError } from "@/lib/jobs/handlers";
 import { normalizeBaseUrl, OkunCrmClient } from "@/lib/crm/okun";
 import { CrmError } from "@/lib/crm/types";
-import { createLeadForThread, getCrmIntegration, linkThread, processThreadForCrm } from "@/lib/crm/service";
+import { analyzeThreadSignals, createLeadForThread, getCrmIntegration, linkThread, logThreadMessages, processThreadForCrm, sendPendingSignals } from "@/lib/crm/service";
+import { EMPTY_ANALYSIS, needsAnalysis, outOfOfficeUntil, sanitize, setSignalClassifier, type Analysis, type MessageForAnalysis } from "@/lib/crm/signals";
+import { setAiConfigured } from "@/lib/ai";
+import { setModelCaller } from "@/lib/marvin/agent";
+import type Anthropic from "@anthropic-ai/sdk";
 import { receiveWebhook, signWebhook } from "@/lib/crm/webhook";
 import { executeTool, toolDefinitions } from "@/lib/marvin/tools";
 import { createConversation } from "@/lib/marvin/agent";
@@ -26,13 +30,30 @@ beforeAll(async () => {
 afterAll(async () => {
   await crm.stop();
 });
+/** Ersetzt die Einordnung durch Claude; zeichnet auf, welche Nachrichten eingeordnet wurden. */
+let classified: MessageForAnalysis[] = [];
+function classifyWith(fn: (m: MessageForAnalysis) => Analysis) {
+  setSignalClassifier(async (m) => {
+    classified.push(m);
+    return fn(m);
+  });
+}
+
 beforeEach(async () => {
   await resetDb();
   crm.reset();
   provider = new FakeProvider();
   setProviderFactory(() => provider);
+  classified = [];
+  setAiConfigured(true);
+  classifyWith(() => EMPTY_ANALYSIS);
 });
-afterEach(() => setProviderFactory(null));
+afterEach(() => {
+  setProviderFactory(null);
+  setSignalClassifier(null);
+  setAiConfigured(null);
+  setModelCaller(null);
+});
 
 const ERIKA = { name: "Erika Muster", email: "erika@beispiel-ag.de" };
 
@@ -69,8 +90,12 @@ async function deliver(account: Awaited<ReturnType<typeof setup>>["account"], m:
   await syncAccount(fresh!);
 }
 
+/** Wie der Worker: Job ausführen und als erledigt markieren. */
 async function runJobs() {
-  for (let job = await claimNext(); job; job = await claimNext()) await handlers[job.kind]!(job);
+  for (let job = await claimNext(); job; job = await claimNext()) {
+    await handlers[job.kind]!(job);
+    await complete(job.id);
+  }
 }
 
 describe("OKUN-CRM-Client (Connect API v1)", () => {
@@ -185,19 +210,39 @@ describe("Abläufe B und C – Folge-Nachrichten am Lead", () => {
     expect(crm.requests.filter((r) => r.path === "/activities")).toHaveLength(3);
   });
 
-  it("meldet Abwesenheitsnotizen nur am Kontakt (stoppt kein Nachfassen) und Unzustellbar-Meldungen gar nicht", async () => {
+  it("meldet Abwesenheitsnotizen am Lead als Signal out_of_office (keine Kundenantwort) und Unzustellbar-Meldungen gar nicht", async () => {
     const { user, account, thread } = await setup();
     crm.seedContact(ERIKA.email, ERIKA.name, [{ title: "Lead" }]);
     const leadId = crm.deals[0]!.id;
     await linkThread(user.id, thread.id, leadId, "user");
-    await deliver(account, message({ providerMessageId: "m2", providerThreadId: "t1", from: ERIKA, subject: "Automatische Antwort: Anfrage Wartungsvertrag", bodyText: "Ich bin bis 10.11. nicht im Büro." }));
-    await deliver(account, message({ providerMessageId: "m3", providerThreadId: "t1", from: ERIKA, subject: "Re: Anfrage", bodyText: "Dies ist eine automatische Antwort. Ihre Nachricht ist eingegangen." }));
+    const at = new Date("2026-11-08T09:00:00Z");
+    await deliver(account, message({ providerMessageId: "m2", providerThreadId: "t1", from: ERIKA, subject: "Automatische Antwort: Anfrage Wartungsvertrag", bodyText: "Ich bin bis 10.11. nicht im Büro.", receivedAt: at }));
+    await deliver(account, message({ providerMessageId: "m3", providerThreadId: "t1", from: ERIKA, subject: "Re: Anfrage", bodyText: "Dies ist eine automatische Antwort. Ihre Nachricht ist eingegangen.", receivedAt: at }));
+    await deliver(account, message({ providerMessageId: "m4", providerThreadId: "t1", from: { email: "MAILER-DAEMON@mail.test" }, subject: "Undelivered Mail Returned to Sender" }));
+    await runJobs();
+
+    expect(crm.activities.size).toBe(1); // nur die ursprüngliche Anfrage – keine Aktivität mit leadId für Abwesenheit
+    expect(crm.signals.map((x) => x.body.signal)).toEqual(["out_of_office", "out_of_office"]);
+    const first = crm.signals[0]!.body as { data?: { until?: string }; evidence?: { quote?: string }; url: string };
+    expect(first.data?.until).toBe("2026-11-10T23:59:00+01:00");
+    expect(first.evidence?.quote).toBe("Ich bin bis 10.11. nicht im Büro.");
+    expect(first.url).toMatch(new RegExp(`/emails/${thread.id}#m-`));
+    expect((crm.signals[1]!.body as { data?: unknown }).data).toBeUndefined(); // ohne Datum: das CRM pausiert 7 Tage
+    expect(classified).toHaveLength(1); // nur die Anfrage wird eingeordnet, Automatisches nie
+  });
+
+  it("ohne Signale: Abwesenheitsnotizen nur am Kontakt, Unzustellbar-Meldungen gar nicht", async () => {
+    const { user, account, thread } = await setup({ signals: "off" });
+    crm.seedContact(ERIKA.email, ERIKA.name, [{ title: "Lead" }]);
+    await linkThread(user.id, thread.id, crm.deals[0]!.id, "user");
+    await deliver(account, message({ providerMessageId: "m2", providerThreadId: "t1", from: ERIKA, subject: "Automatische Antwort: Anfrage", bodyText: "Ich bin bis 10.11. nicht im Büro." }));
     await deliver(account, message({ providerMessageId: "m4", providerThreadId: "t1", from: { email: "MAILER-DAEMON@mail.test" }, subject: "Undelivered Mail Returned to Sender" }));
     await runJobs();
     const bodies = [...crm.activities.values()].map((a) => a.body);
-    expect(bodies).toHaveLength(3);
-    expect(bodies.slice(1).every((b) => !b.leadId && b.contactId && String(b.summary).startsWith("[Automatische Antwort]"))).toBe(true);
-    expect(String(bodies[0]!.url)).toMatch(new RegExp(`/emails/${thread.id}#m-`));
+    expect(bodies).toHaveLength(2);
+    expect(!bodies[1]!.leadId && bodies[1]!.contactId && String(bodies[1]!.summary).startsWith("[Automatische Antwort]")).toBe(true);
+    expect(crm.signals).toHaveLength(0);
+    expect(classified).toHaveLength(0);
   });
 
   it("überträgt standardmäßig nur eine Vorschau, auf Wunsch den vollen Text, im Modus „aus“ nichts", async () => {
@@ -285,13 +330,224 @@ describe("Abläufe B und C – Folge-Nachrichten am Lead", () => {
   });
 });
 
+const raw = (signals: Partial<Analysis["signals"][number] & Record<string, unknown>>[]) => ({ signals, task: null, contact_details: null }) as never;
+const msg = (over: Partial<MessageForAnalysis> = {}): MessageForAnalysis => ({
+  direction: "inbound",
+  subject: "Re: Angebot",
+  body: "Guten Tag, wir nehmen Ihr Angebot an. Bitte rufen Sie mich am Dienstag an.",
+  attachments: [],
+  receivedAt: new Date("2026-11-08T09:00:00Z"),
+  timezone: "Europe/Berlin",
+  leadTitle: "Rahmenvertrag 2027",
+  ...over,
+});
+const sig = (signal: string, confidence: number, quote: string, extra: Record<string, unknown> = {}) => ({
+  signal,
+  confidence,
+  quote,
+  summary: "…",
+  offer_number: null,
+  value_eur: null,
+  valid_until: null,
+  start_at: null,
+  end_at: null,
+  until: null,
+  reason: null,
+  ...extra,
+});
+
+describe("Signal-Erkennung (Regeln)", () => {
+  it("prüft Richtung, Schwelle 0,6, wörtliche Zitate und Termine", () => {
+    const out = sanitize(
+      raw([
+        sig("offer_accepted", 0.92, "wir nehmen Ihr Angebot an"),
+        sig("offer_accepted", 0.7, "wir nehmen Ihr Angebot an"), // schwächeres Duplikat
+        sig("question", 0.55, "Bitte rufen Sie mich am Dienstag an."), // unter der Schwelle
+        sig("offer_sent", 0.95, "wir nehmen Ihr Angebot an"), // falsche Richtung
+        sig("meeting_booked", 0.9, "am Dienstag"), // ohne Zeitpunkt kein gebuchter Termin
+        sig("meeting_requested", 0.8, "Wir möchten Sie gern zum Essen einladen"), // erfundenes Zitat
+      ] as never),
+      msg(),
+    );
+    expect(out.signals.map((x) => [x.signal, x.confidence, x.quote])).toEqual([
+      ["offer_accepted", 0.92, "wir nehmen Ihr Angebot an"],
+      ["meeting_requested", 0.8, undefined],
+    ]);
+  });
+
+  it("übernimmt Angebotsdaten nur in gültiger Form", () => {
+    const out = sanitize(
+      raw([sig("offer_sent", 0.9, "anbei unser Angebot", { offer_number: "2026-117", value_eur: 24000, valid_until: "2026-11-30", start_at: "morgen" })] as never),
+      msg({ direction: "outbound", body: "Hallo Frau Muster, anbei unser Angebot Nr. 2026-117." }),
+    );
+    expect(out.signals[0]!.data).toEqual({ offerNumber: "2026-117", valueCents: 2_400_000, validUntil: "2026-11-30" });
+  });
+
+  it("Vorfilter: ausgehend nur bei Angebot, Vertrag oder Terminbestätigung", () => {
+    expect(needsAnalysis(msg())).toBe(true);
+    expect(needsAnalysis(msg({ direction: "outbound", body: "Danke für das nette Gespräch!" }))).toBe(false);
+    expect(needsAnalysis(msg({ direction: "outbound", body: "Siehe Anhang.", attachments: ["Angebot_2026-117.pdf"] }))).toBe(true);
+    expect(needsAnalysis(msg({ direction: "outbound", body: "Anbei sende ich Ihnen unser Angebot." }))).toBe(true);
+    expect(needsAnalysis(msg({ direction: "outbound", body: "Der Termin am Dienstag ist bestätigt." }))).toBe(true);
+  });
+
+  it("liest das Rückkehrdatum aus Abwesenheitsnotizen", () => {
+    const at = new Date("2026-11-08T09:00:00Z");
+    expect(outOfOfficeUntil("Ich bin bis 10.11. nicht im Büro.", at, "Europe/Berlin")).toBe("2026-11-10T23:59:00+01:00");
+    expect(outOfOfficeUntil("Abwesend bis einschließlich 3.7.2027", at, "Europe/Berlin")).toBe("2027-07-03T23:59:00+02:00");
+    expect(outOfOfficeUntil("Bis 2.1. im Urlaub", at, "Europe/Berlin")).toBe("2027-01-02T23:59:00+01:00");
+    expect(outOfOfficeUntil("Ab 10.11. bin ich im Urlaub.", at, "Europe/Berlin")).toBeUndefined();
+  });
+});
+
+describe("Signale, Aufgaben und Kontaktdaten (v1.2/v1.3)", () => {
+  async function linked(settings: Partial<CrmSettings> = {}) {
+    const s = await setup(settings, { secret: "whsec_test_geheimnis_1234567890" });
+    crm.seedContact(ERIKA.email, ERIKA.name, [{ title: "Rahmenvertrag 2027" }]);
+    const leadId = crm.deals[0]!.id;
+    await linkThread(s.user.id, s.thread.id, leadId, "user");
+    await runJobs();
+    return { ...s, leadId };
+  }
+
+  it("Zusage des Kunden: Aktivität am Lead plus Signal offer_accepted mit Vorschlag – Entscheidung kommt per Rückkanal zurück", async () => {
+    classifyWith((m) =>
+      m.body.includes("nehmen Ihr Angebot an")
+        ? { ...EMPTY_ANALYSIS, signals: [{ signal: "offer_accepted", confidence: 0.92, quote: "wir nehmen Ihr Angebot an", summary: "Kunde nimmt das Angebot an.", data: {} }] }
+        : EMPTY_ANALYSIS,
+    );
+    const { account, thread, leadId, integration } = await linked();
+    await deliver(account, message({ providerMessageId: "m2", providerThreadId: "t1", from: ERIKA, bodyText: "Guten Tag, wir nehmen Ihr Angebot an." }));
+    await runJobs();
+
+    const [, reply] = [...crm.activities.values()];
+    expect(reply!.body).toMatchObject({ leadId, direction: "inbound" }); // echte Antwort zählt als Kundenreaktion
+    expect(crm.signals).toHaveLength(1);
+    const call = crm.requests.find((r) => r.path.endsWith("/signals"))!;
+    expect(call.headers["idempotency-key"]).toMatch(/^signal:[0-9a-f-]{36}:offer_accepted$/);
+    expect(call.body).toMatchObject({ signal: "offer_accepted", evidence: { quote: "wir nehmen Ihr Angebot an", confidence: 0.92 } });
+    expect(String(call.body!.externalId)).toMatch(/^email:/);
+
+    const [row] = await db.select().from(schema.crmSignals).where(eq(schema.crmSignals.integrationId, integration.id));
+    expect(row!.proposals.map((p) => p.kind)).toEqual(["deal.mark_won"]);
+    expect(row!.sentAt).not.toBeNull();
+
+    // Ein Mensch verwirft den Vorschlag im CRM
+    const SECRET = "whsec_test_geheimnis_1234567890";
+    const body = JSON.stringify({ id: "evt_pr1", type: "signal.proposal_resolved", occurredAt: new Date().toISOString(), workspaceId: "ws_sandbox", data: { proposalId: row!.proposals[0]!.id, kind: "deal.mark_won", accepted: false, signal: "offer_accepted", externalId: "x", resolvedAt: "2026-11-08T10:20:00.000Z" } });
+    const ts = String(Math.floor(Date.now() / 1000));
+    const res = await receiveWebhook(body, new Headers({ "x-okun-timestamp": ts, "x-okun-signature": signWebhook(body, ts, SECRET), "x-okun-workspace": "ws_sandbox" }), null);
+    expect(res.status).toBe(200);
+    const [after] = await db.select().from(schema.crmSignals).where(eq(schema.crmSignals.id, row!.id));
+    expect(after!.proposals[0]).toMatchObject({ accepted: false, resolvedAt: "2026-11-08T10:20:00.000Z" });
+    expect(thread.id).toBeTruthy();
+  });
+
+  it("Angebot verschickt: nur passende ausgehende Mails werden eingeordnet; Phase und nächster Schritt kommen aus der Antwort", async () => {
+    classifyWith((m) =>
+      m.attachments.includes("Angebot_2026-117.pdf")
+        ? { ...EMPTY_ANALYSIS, signals: [{ signal: "offer_sent", confidence: 0.93, quote: "anbei unser Angebot", summary: "Angebot 2026-117 verschickt.", data: { offerNumber: "2026-117", valueCents: 2_400_000 } }] }
+        : EMPTY_ANALYSIS,
+    );
+    const { account, thread } = await linked();
+    classified = [];
+    const out = { from: { email: account.emailAddress }, to: [ERIKA], isOutgoing: true, providerThreadId: "t1" };
+    await deliver(account, message({ ...out, providerMessageId: "m2", bodyText: "Danke für das nette Gespräch!" }));
+    await deliver(account, message({ ...out, providerMessageId: "m3", bodyText: "Hallo Frau Muster, anbei unser Angebot.", attachments: [{ providerAttachmentId: "a1", filename: "Angebot_2026-117.pdf", mimeType: "application/pdf", sizeBytes: 1000 }] }));
+    await runJobs();
+
+    expect(classified).toHaveLength(1);
+    expect(crm.deals[0]).toMatchObject({ stageId: "st_angebot", valueCents: 2_400_000 });
+    const [link] = await db.select().from(schema.crmThreadLinks).where(eq(schema.crmThreadLinks.threadId, thread.id));
+    expect(link).toMatchObject({ leadStage: "Angebot", nextActionTitle: "Angebot nachfassen", operationalState: "waiting_for_customer" });
+    expect(link!.nextActionDueAt).not.toBeNull();
+    const [row] = await db.select().from(schema.crmSignals);
+    expect(row!.applied).toEqual(expect.arrayContaining(["stage_changed:Angebot", "value_updated", "offer_follow_up"]));
+  });
+
+  it("Rückruf-Bitte wird Aufgabe (dauerhaft idempotent), Signatur ergänzt leere Kontaktfelder", async () => {
+    classifyWith((m) =>
+      m.body.includes("rufen Sie mich")
+        ? {
+            signals: [],
+            task: { title: "Frau Muster zurückrufen", dueAt: "2026-11-10T10:00:00+01:00", confidence: 0.9, quote: "Bitte rufen Sie mich am Dienstag an." },
+            contactDetails: { fields: { phone: "+49 40 123456", jobTitle: "Einkaufsleiterin" }, confidence: 0.9, quote: "Tel. +49 40 123456" },
+          }
+        : EMPTY_ANALYSIS,
+    );
+    const { account, leadId } = await linked();
+    await deliver(account, message({ providerMessageId: "m2", providerThreadId: "t1", from: ERIKA, bodyText: "Bitte rufen Sie mich am Dienstag an.\n\nErika Muster\nEinkaufsleiterin\nTel. +49 40 123456" }));
+    await runJobs();
+
+    const tasks = [...crm.tasks.entries()];
+    expect(tasks).toHaveLength(1);
+    expect(tasks[0]![0]).toMatch(/^task:[0-9a-f-]{36}$/);
+    expect(tasks[0]![1].body).toMatchObject({ title: "Frau Muster zurückrufen", dueAt: "2026-11-10T10:00:00+01:00", leadId });
+    expect(crm.contacts[0]).toMatchObject({ phone: "+49 40 123456", jobTitle: "Einkaufsleiterin" });
+    const [contactRow] = await db.select().from(schema.crmSignals).where(eq(schema.crmSignals.signal, "contact_details"));
+    expect(contactRow!.applied).toEqual(["filled:phone", "filled:jobTitle"]);
+
+    // Erneutes Senden derselben Aufgabe (z. B. nach einem Abbruch) legt keine zweite an
+    await db.update(schema.crmSignals).set({ sentAt: null }).where(eq(schema.crmSignals.signal, "task"));
+    await deliver(account, message({ providerMessageId: "m9", providerThreadId: "t1", from: { email: account.emailAddress }, to: [ERIKA], isOutgoing: true, bodyText: "Danke!" }));
+    await runJobs();
+    expect(crm.tasks.size).toBe(1);
+    const [taskRow] = await db.select().from(schema.crmSignals).where(eq(schema.crmSignals.signal, "task"));
+    expect(taskRow!.applied).toEqual(["task_exists"]);
+  });
+
+  it("CRM-Ausfall: Wiederholung sendet ohne erneute Einordnung; 422 wird festgehalten statt wiederholt", async () => {
+    classifyWith((m) =>
+      m.body.includes("Termin")
+        ? { ...EMPTY_ANALYSIS, signals: [{ signal: "meeting_requested", confidence: 0.85, quote: "gern einen Termin", summary: "Terminwunsch.", data: {} }] }
+        : EMPTY_ANALYSIS,
+    );
+    const { account, thread, integration } = await linked();
+    await deliver(account, message({ providerMessageId: "m2", providerThreadId: "t1", from: ERIKA, bodyText: "Wir hätten gern einen Termin." }));
+    const [link] = await db.select().from(schema.crmThreadLinks).where(eq(schema.crmThreadLinks.threadId, thread.id));
+    await logThreadMessages(integration, link!);
+    classified = [];
+    await analyzeThreadSignals(integration, link!);
+    expect(classified).toHaveLength(1);
+
+    crm.failNext = 1;
+    await expect(sendPendingSignals(integration, thread.id)).rejects.toMatchObject({ status: 503, retryable: true });
+    expect(await sendPendingSignals(integration, thread.id)).toBe(1);
+    await analyzeThreadSignals(integration, link!);
+    expect(classified).toHaveLength(1); // nicht erneut eingeordnet
+    expect(crm.signals).toHaveLength(1);
+
+    const [email] = await db.select().from(schema.emails).where(eq(schema.emails.providerMessageId, "m2"));
+    await db.insert(schema.crmSignals).values({ integrationId: integration.id, emailId: email!.id, threadId: thread.id, leadId: link!.leadId!, signal: "question", payload: { signal: "unbekannt", occurredAt: new Date().toISOString(), externalId: "email:x", url: "https://okun-mailwin.com/emails/x" } });
+    expect(await sendPendingSignals(integration, thread.id)).toBe(0);
+    const [failed] = await db.select().from(schema.crmSignals).where(eq(schema.crmSignals.signal, "question"));
+    expect(failed!.error).toMatch(/^validation_failed/);
+    expect(await sendPendingSignals(integration, thread.id)).toBe(0); // kein erneuter Versuch
+  });
+
+  it("Signale nur, wenn Marvin verfügbar ist – Abwesenheitsnotizen trotzdem", async () => {
+    setAiConfigured(false);
+    const { account } = await linked();
+    await deliver(account, message({ providerMessageId: "m2", providerThreadId: "t1", from: ERIKA, subject: "Out of Office: Anfrage", bodyText: "Back on 12.11." }));
+    await deliver(account, message({ providerMessageId: "m3", providerThreadId: "t1", from: ERIKA, bodyText: "Wir nehmen Ihr Angebot an." }));
+    await runJobs();
+    expect(classified).toHaveLength(0);
+    expect(crm.signals.map((x) => x.body.signal)).toEqual(["out_of_office"]);
+  });
+});
+
 describe("Ablauf D – Webhooks des CRM", () => {
   const SECRET = "whsec_test_geheimnis_1234567890";
 
-  function delivery(event: Record<string, unknown>, opts: { secret?: string; ts?: number } = {}) {
+  function delivery(event: Record<string, unknown>, opts: { secret?: string; ts?: number; workspace?: string } = {}) {
     const raw = JSON.stringify(event);
     const ts = String(opts.ts ?? Math.floor(Date.now() / 1000));
-    const headers = new Headers({ "x-okun-timestamp": ts, "x-okun-signature": signWebhook(raw, ts, opts.secret ?? SECRET), "x-okun-event": String(event.type) });
+    const headers = new Headers({
+      "x-okun-timestamp": ts,
+      "x-okun-signature": signWebhook(raw, ts, opts.secret ?? SECRET),
+      "x-okun-event": String(event.type),
+      ...(opts.workspace ? { "x-okun-workspace": opts.workspace } : {}),
+    });
     return { raw, headers };
   }
 
@@ -378,5 +634,86 @@ describe("Ablauf D – Webhooks des CRM", () => {
 
     const ping = delivery({ id: "evt_p", type: "ping", occurredAt: new Date().toISOString(), data: { workspaceId: "ws_sandbox", message: "Test" } });
     expect((await receiveWebhook(ping.raw, ping.headers, null)).status).toBe(200);
+  });
+
+  it("v1.3: wählt die Integration über den Arbeitsbereich vor – entscheidend bleibt die Signatur", async () => {
+    const { leadId } = await linkedSetup();
+    const event = { ...leadEvent("lead.stage_changed", leadId, { id: "st_angebot", name: "Angebot" }, "open", new Date().toISOString()), workspaceId: "ws_sandbox" };
+    const ok = delivery(event, { workspace: "ws_sandbox" });
+    expect((await receiveWebhook(ok.raw, ok.headers, null)).status).toBe(200);
+    expect((await db.select().from(schema.crmThreadLinks))[0]!.leadStage).toBe("Angebot");
+    // Ein falscher Arbeitsbereich im Header hilft einer gefälschten Signatur nicht
+    const forged = delivery({ ...event, id: "evt_x" }, { workspace: "ws_sandbox", secret: "falsches_geheimnis_123456" });
+    expect((await receiveWebhook(forged.raw, forged.headers, null)).status).toBe(401);
+  });
+
+  it("v1.3: lead.deleted stuft auf den Kontakt zurück und verwirft offene Meldungen; contact.merged zieht die Kontakt-ID nach", async () => {
+    const { user, thread, leadId, integration } = await linkedSetup();
+    const [email] = await db.select().from(schema.emails).where(eq(schema.emails.threadId, thread.id));
+    await db.insert(schema.crmSignals).values({ integrationId: integration.id, emailId: email!.id, threadId: thread.id, leadId, signal: "question", payload: {} });
+
+    const del = delivery({ id: "evt_del", type: "lead.deleted", occurredAt: new Date().toISOString(), workspaceId: "ws_sandbox", data: { id: leadId } });
+    expect((await receiveWebhook(del.raw, del.headers, null)).status).toBe(200);
+    const [link] = await db.select().from(schema.crmThreadLinks);
+    expect(link).toMatchObject({ leadId: null, leadTitle: null, contactName: "Erika Muster" });
+    expect((await db.select().from(schema.crmSignals))[0]!.error).toMatch(/gelöscht/);
+    const notes = await db.select().from(schema.notifications).where(and(eq(schema.notifications.userId, user.id), eq(schema.notifications.kind, "crm_update")));
+    expect(notes.map((n) => n.title)).toEqual(["Lead im CRM gelöscht: Rahmenvertrag 2027"]);
+
+    const merged = delivery({
+      id: "evt_merge",
+      type: "contact.merged",
+      occurredAt: new Date().toISOString(),
+      workspaceId: "ws_sandbox",
+      data: { fromId: link!.contactId, intoId: "ct_neu", contact: { id: "ct_neu", name: "Erika Muster-Schmidt", email: ERIKA.email, url: "https://crm/contacts/ct_neu" } },
+    });
+    expect((await receiveWebhook(merged.raw, merged.headers, null)).status).toBe(200);
+    expect((await db.select().from(schema.crmThreadLinks))[0]).toMatchObject({ contactId: "ct_neu", contactName: "Erika Muster-Schmidt" });
+  });
+
+  it("v1.3: nächster Schritt wird angezeigt; fällig → Marvin bereitet einen Nachfass-Entwurf zur Freigabe vor", async () => {
+    const { user, thread, leadId } = await linkedSetup();
+    const lead = { id: leadId, title: "Rahmenvertrag 2027", url: `${crm.appUrl}/deals/${leadId}`, stage: { id: "st_angebot", name: "Angebot" }, status: "open", contacts: [], sourceRef: null };
+    const changed = delivery({ id: "evt_na", type: "lead.next_action_changed", occurredAt: new Date().toISOString(), workspaceId: "ws_sandbox", data: { lead, nextAction: { type: "chase_offer", title: "Angebot nachfassen", reason: "Seit 7 Tagen keine Antwort", dueAt: "2026-11-10T09:12:00.000Z", operationalState: "waiting_for_customer" } } });
+    expect((await receiveWebhook(changed.raw, changed.headers, null)).status).toBe(200);
+    expect((await db.select().from(schema.crmThreadLinks))[0]).toMatchObject({ nextActionTitle: "Angebot nachfassen", operationalState: "waiting_for_customer", leadStage: "Angebot" });
+
+    const [email] = await db.select().from(schema.emails).where(eq(schema.emails.threadId, thread.id));
+    const calls: Anthropic.Beta.Messages.MessageCreateParamsNonStreaming[] = [];
+    const replies: Partial<Anthropic.Beta.Messages.BetaMessage>[] = [
+      { stop_reason: "tool_use", content: [{ type: "tool_use", id: "tu_1", name: "draft_email", input: { to: [{ email: ERIKA.email }], subject: "Re: Anfrage Wartungsvertrag", body: "Guten Tag Frau Muster, darf ich kurz nachfragen …", reply_to_email_id: email!.id } } as never] },
+      { stop_reason: "end_turn", content: [{ type: "text", text: "Der Entwurf liegt zur Freigabe bereit.", citations: null } as never] },
+    ];
+    setModelCaller(async (params) => {
+      calls.push(structuredClone(params));
+      return { id: `msg_${calls.length}`, type: "message", role: "assistant", model: params.model, ...replies[calls.length - 1] } as Anthropic.Beta.Messages.BetaMessage;
+    });
+    const due = delivery({ id: "evt_due", type: "lead.next_action_due", occurredAt: new Date().toISOString(), workspaceId: "ws_sandbox", data: { lead, nextAction: { id: "na_1", type: "chase_offer", title: "Angebot nachfassen", reason: "Seit 7 Tagen keine Antwort", dueAt: "2026-11-10T09:12:00.000Z" } } });
+    expect((await receiveWebhook(due.raw, due.headers, null)).status).toBe(200); // antwortet sofort, Entwurf im Hintergrund
+    await runJobs();
+
+    expect(calls).toHaveLength(2);
+    const prompt = JSON.stringify(calls[0]!.messages);
+    expect(prompt).toContain("[Systemhinweis von Mailwin]");
+    expect(prompt).toContain("Angebot nachfassen");
+    expect(calls[0]!.tools!.map((t) => (t as { name?: string }).name)).toContain("crm_lookup");
+    const [approval] = await db.select().from(schema.approvalRequests).where(eq(schema.approvalRequests.userId, user.id));
+    expect(approval).toMatchObject({ action: "send_email", status: "pending" });
+    expect(provider.sent).toHaveLength(0); // nie automatisch versendet
+    const notes = await db.select().from(schema.notifications).where(and(eq(schema.notifications.userId, user.id), eq(schema.notifications.kind, "crm_update")));
+    expect(notes.map((n) => n.title)).toContain("Nachfassen fällig: Rahmenvertrag 2027");
+    const [conversation] = await db.select().from(schema.marvinConversations).where(eq(schema.marvinConversations.userId, user.id));
+    expect(conversation!.title).toBe("CRM: Angebot nachfassen – Rahmenvertrag 2027");
+  });
+
+  it("v1.3: ohne Marvin wird der fällige Schritt zur Aufgabe an der Konversation", async () => {
+    setAiConfigured(false);
+    const { user, thread, leadId } = await linkedSetup();
+    const lead = { id: leadId, title: "Rahmenvertrag 2027", stage: { id: "st_qual", name: "Qualifiziert" }, status: "open", contacts: [], sourceRef: null };
+    const due = delivery({ id: "evt_due2", type: "lead.next_action_due", occurredAt: new Date().toISOString(), workspaceId: "ws_sandbox", data: { lead, nextAction: { id: "na_2", type: "follow_up", title: "Nachfassen", dueAt: null } } });
+    await receiveWebhook(due.raw, due.headers, null);
+    await runJobs();
+    const [task] = await db.select().from(schema.tasks).where(eq(schema.tasks.userId, user.id));
+    expect(task).toMatchObject({ title: "Nachfassen: Rahmenvertrag 2027", threadId: thread.id });
   });
 });

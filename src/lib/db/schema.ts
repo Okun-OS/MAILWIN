@@ -8,6 +8,7 @@ import {
   boolean,
   integer,
   jsonb,
+  real,
   uniqueIndex,
   index,
   primaryKey,
@@ -618,6 +619,8 @@ export type CrmSettings = {
   leadMode: "approval" | "direct";
   /** Übertragener Nachrichteninhalt: Vorschau (Datensparsamkeit) oder vollständig */
   content: "preview" | "full";
+  /** Signale erkennen und melden (Angebot, Zusage, Termin, Rückfrage, Abwesenheit, Aufgaben, Kontaktdaten); fehlt = an */
+  signals?: "on" | "off";
 };
 
 export const integrations = pgTable(
@@ -660,6 +663,11 @@ export const crmThreadLinks = pgTable(
     linkedBy: text("linked_by").$type<"user" | "marvin" | "auto">().notNull().default("user"),
     /** Zeitpunkt des zuletzt übernommenen Lead-Ereignisses – ältere, verspätet zugestellte Webhooks überschreiben nichts */
     leadEventAt: timestamp("lead_event_at", { withTimezone: true }),
+    /** Nächster Schritt laut aktivem CRM (Webhook lead.next_action_changed) */
+    nextActionType: text("next_action_type"),
+    nextActionTitle: text("next_action_title"),
+    nextActionDueAt: timestamp("next_action_due_at", { withTimezone: true }),
+    operationalState: text("operational_state"),
     updatedAt: updatedAt(),
   },
   (t) => [index("crm_thread_links_lead").on(t.integrationId, t.leadId)],
@@ -672,11 +680,49 @@ export const crmActivities = pgTable(
     id: id(),
     integrationId: uuid("integration_id").notNull().references(() => integrations.id, { onDelete: "cascade" }),
     emailId: uuid("email_id").notNull().references(() => emails.id, { onDelete: "cascade" }),
-    activityId: text("activity_id").notNull(),
+    /** null: Nachricht bewusst nicht als Aktivität gemeldet (Unzustellbar-Meldung, Abwesenheitsnotiz als Signal) */
+    activityId: text("activity_id"),
     leadId: text("lead_id"),
+    /** Signal-Erkennung für diese Nachricht abgeschlossen (null = steht noch aus) */
+    signalsCheckedAt: timestamp("signals_checked_at", { withTimezone: true }),
     createdAt: createdAt(),
   },
   (t) => [uniqueIndex("crm_activities_once").on(t.integrationId, t.emailId)],
+);
+
+export type CrmProposal = { id: string; kind: string; title: string; accepted?: boolean; resolvedAt?: string };
+
+/**
+ * Aus Nachrichten erkannte Meldungen ans CRM: Signale (POST /leads/{id}/signals), Aufgaben (`task`) und
+ * Kontaktdaten (`contact_details`). Erst gespeichert, dann gesendet – eine Wiederholung sendet ohne neue Einordnung.
+ */
+export const crmSignals = pgTable(
+  "crm_signals",
+  {
+    id: id(),
+    integrationId: uuid("integration_id").notNull().references(() => integrations.id, { onDelete: "cascade" }),
+    emailId: uuid("email_id").notNull().references(() => emails.id, { onDelete: "cascade" }),
+    threadId: uuid("thread_id").notNull().references(() => emailThreads.id, { onDelete: "cascade" }),
+    leadId: text("lead_id").notNull(),
+    /** Signalname (offer_sent …) oder `task` / `contact_details` */
+    signal: text("signal").notNull(),
+    /** Anfrage, wie sie ans CRM geht (ohne Zeitstempel-Umwandlung) */
+    payload: jsonb("payload").$type<Record<string, unknown>>().notNull(),
+    sentAt: timestamp("sent_at", { withTimezone: true }),
+    /** Fehler, bei dem eine Wiederholung nicht hilft (z. B. 422) */
+    error: text("error"),
+    confidence: real("confidence"),
+    quote: text("quote"),
+    summary: text("summary"),
+    applied: text("applied").array().notNull().default([]),
+    ignored: text("ignored").array().notNull().default([]),
+    proposals: jsonb("proposals").$type<CrmProposal[]>().notNull().default([]),
+    /** Nächster Schritt laut Antwort des CRM, z. B. „Angebot nachfassen“ */
+    nextActionTitle: text("next_action_title"),
+    nextActionDueAt: timestamp("next_action_due_at", { withTimezone: true }),
+    createdAt: createdAt(),
+  },
+  (t) => [uniqueIndex("crm_signals_once").on(t.integrationId, t.emailId, t.signal), index("crm_signals_thread").on(t.threadId)],
 );
 
 /** Empfangene Webhook-Ereignisse (je Integration) – Zustellungen werden wiederholt, verarbeitet wird jedes Ereignis einmal */

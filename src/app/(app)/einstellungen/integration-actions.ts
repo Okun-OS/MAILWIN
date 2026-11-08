@@ -83,6 +83,7 @@ export async function updateCrmSettingsAction(_prev: CrmState, form: FormData): 
     logMode: pick("logMode", ["off", "linked", "known_contacts"] as const, integration.settings.logMode),
     leadMode: pick("leadMode", ["approval", "direct"] as const, integration.settings.leadMode),
     content: pick("content", ["preview", "full"] as const, integration.settings.content),
+    signals: pick("signals", ["on", "off"] as const, integration.settings.signals ?? "on"),
   };
   await db.update(schema.integrations).set({ settings, updatedAt: new Date() }).where(eq(schema.integrations.id, integration.id));
   await audit({ userId: user.id, actor: "user", action: "crm_settings", targetType: "integration", targetId: integration.id, status: "success", details: settings });

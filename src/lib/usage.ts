@@ -16,7 +16,7 @@ export function estimateCostMicros(model: string, u: { input: number; output: nu
   return Math.round(usd * 1_000_000);
 }
 
-export async function recordUsage(userId: string, response: Anthropic.Beta.Messages.BetaMessage) {
+export async function recordUsage(userId: string, response: Anthropic.Beta.Messages.BetaMessage, kind: "marvin_call" | "crm_signals" = "marvin_call") {
   const u = response.usage;
   const values = {
     input: u?.input_tokens ?? 0,
@@ -27,7 +27,7 @@ export async function recordUsage(userId: string, response: Anthropic.Beta.Messa
   };
   await db.insert(schema.usageEvents).values({
     userId,
-    kind: "marvin_call",
+    kind,
     model: response.model,
     inputTokens: values.input,
     outputTokens: values.output,

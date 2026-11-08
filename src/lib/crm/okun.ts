@@ -1,4 +1,17 @@
-import { CrmError, type CrmActivityInput, type CrmConnector, type CrmContact, type CrmLeadInput, type CrmPipeline, type CrmWorkspace } from "./types";
+import {
+  CrmError,
+  type CrmActivityInput,
+  type CrmConnector,
+  type CrmContact,
+  type CrmContactSuggestionInput,
+  type CrmLeadContext,
+  type CrmLeadInput,
+  type CrmPipeline,
+  type CrmSignalInput,
+  type CrmSignalOutcome,
+  type CrmTaskInput,
+  type CrmWorkspace,
+} from "./types";
 
 const TIMEOUT_MS = 15_000;
 
@@ -102,6 +115,43 @@ export class OkunCrmClient implements CrmConnector {
         occurredAt: input.occurredAt.toISOString(),
         externalId: input.externalId.slice(0, 200),
       },
+      idempotencyKey,
+    );
+  }
+
+  getLead(id: string) {
+    return this.call<CrmLeadContext>("GET", `/leads/${encodeURIComponent(id)}`);
+  }
+
+  sendSignal(leadId: string, input: CrmSignalInput, idempotencyKey: string) {
+    return this.call<CrmSignalOutcome>(
+      "POST",
+      `/leads/${encodeURIComponent(leadId)}/signals`,
+      {
+        ...input,
+        occurredAt: input.occurredAt.toISOString(),
+        externalId: input.externalId.slice(0, 200),
+        summary: input.summary?.slice(0, 2000),
+        ...(input.evidence ? { evidence: { ...input.evidence, quote: input.evidence.quote?.slice(0, 300) } } : {}),
+      },
+      idempotencyKey,
+    );
+  }
+
+  createTask(input: CrmTaskInput) {
+    // externalId macht den Aufruf dauerhaft idempotent (nicht nur 24 Stunden)
+    return this.call<{ id: string; url: string; duplicate: boolean }>("POST", "/tasks", {
+      ...input,
+      title: input.title.slice(0, 200),
+      description: input.description?.slice(0, 5000),
+    });
+  }
+
+  suggestContactDetails(contactId: string, input: CrmContactSuggestionInput, idempotencyKey?: string) {
+    return this.call<{ applied: string[]; proposed: { id: string; fields: string[] } | null }>(
+      "POST",
+      `/contacts/${encodeURIComponent(contactId)}/suggestions`,
+      { ...input, ...(input.evidence ? { evidence: { ...input.evidence, quote: input.evidence.quote?.slice(0, 300) } } : {}) },
       idempotencyKey,
     );
   }

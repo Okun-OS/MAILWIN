@@ -1,7 +1,7 @@
 import Anthropic from "@anthropic-ai/sdk";
 import { and, eq } from "drizzle-orm";
 import { db, schema } from "../db";
-import { requireEnv } from "../env";
+import { anthropic, CLAUDE_MODEL } from "../ai";
 import { listAccounts } from "../mail/accounts";
 import { LEVEL_LABEL } from "./permissions";
 import { appendMessage, loadMessages, toApiMessages } from "./history";
@@ -11,17 +11,11 @@ import { hasFeature } from "../features";
 import { recordUsage } from "../usage";
 import { getCrmIntegration } from "../crm/service";
 
-export const MARVIN_MODEL = "claude-opus-5-5";
+export const MARVIN_MODEL = CLAUDE_MODEL;
 const MAX_STEPS = 12;
 
 type BetaContentBlock = Anthropic.Beta.Messages.BetaContentBlock;
 type BetaContentBlockParam = Anthropic.Beta.Messages.BetaContentBlockParam;
-
-let client: Anthropic | null = null;
-function anthropic() {
-  client ??= new Anthropic({ apiKey: requireEnv("ANTHROPIC_API_KEY") });
-  return client;
-}
 
 /** Für Tests: Modellaufruf ersetzen. */
 type CreateFn = (params: Anthropic.Beta.Messages.MessageCreateParamsNonStreaming) => Promise<Anthropic.Beta.Messages.BetaMessage>;

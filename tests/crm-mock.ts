@@ -8,8 +8,20 @@ import type { AddressInfo } from "node:net";
  */
 export const MOCK_KEY = "okun_mw_testschluessel";
 
-type Contact = { id: string; name: string; email: string; phone: string | null; companyId: string | null };
-type Deal = { id: string; title: string; description: string; pipelineId: string; stageId: string; status: "open" | "won" | "lost"; contactId: string; valueCents?: number; sourceRef: Record<string, string> };
+type Contact = { id: string; name: string; email: string; phone: string | null; companyId: string | null; jobTitle?: string | null };
+type Deal = {
+  id: string;
+  title: string;
+  description: string;
+  pipelineId: string;
+  stageId: string;
+  status: "open" | "won" | "lost";
+  contactId: string;
+  valueCents?: number;
+  sourceRef: Record<string, string>;
+  nextAction?: { type: string; title: string; dueAt: string | null } | null;
+  pausedUntil?: string | null;
+};
 
 export interface MockRequest {
   method: string;
@@ -41,6 +53,11 @@ export class MockCrm {
   requests: MockRequest[] = [];
   revoked = false;
   rateLimitNext = 0;
+  /** Nächste n Anfragen mit 503 beantworten (Wiederholung testen) */
+  failNext = 0;
+  signals: { leadId: string; body: Record<string, unknown>; outcome: Record<string, unknown> }[] = [];
+  tasks = new Map<string, { id: string; body: Record<string, unknown> }>();
+  suggestions: { contactId: string; body: Record<string, unknown> }[] = [];
   contacts: Contact[] = [];
   companies: { id: string; name: string; domain: string | null }[] = [];
   deals: Deal[] = [];
@@ -63,8 +80,9 @@ export class MockCrm {
     return new Promise<void>((r) => this.server.close(() => r()));
   }
   reset() {
-    Object.assign(this, { requests: [], revoked: false, rateLimitNext: 0, contacts: [], companies: [], deals: [] });
+    Object.assign(this, { requests: [], revoked: false, rateLimitNext: 0, failNext: 0, contacts: [], companies: [], deals: [], signals: [], suggestions: [] });
     this.activities.clear();
+    this.tasks.clear();
     this.idem.clear();
   }
 
@@ -114,6 +132,10 @@ export class MockCrm {
 
     if (req.headers.authorization !== `Bearer ${MOCK_KEY}` || this.revoked) {
       return send(res, 401, err("unauthorized", "Der API-Schlüssel fehlt, ist ungültig oder wurde widerrufen."));
+    }
+    if (this.failNext > 0) {
+      this.failNext--;
+      return send(res, 503, err("internal_error", "Vorübergehend nicht verfügbar."));
     }
     if (this.rateLimitNext > 0) {
       this.rateLimitNext--;
@@ -199,7 +221,138 @@ export class MockCrm {
       this.activities.set(b.externalId as string, { id, body: b });
       return [201, { id }];
     }
+    const leadPath = /^\/leads\/([^/]+)(\/signals)?$/.exec(path);
+    if (leadPath) {
+      const deal = this.deals.find((d) => d.id === decodeURIComponent(leadPath[1]!));
+      if (!deal) return [404, err("not_found", "Lead nicht gefunden.")];
+      if (method === "GET" && !leadPath[2]) return [200, this.leadContext(deal)];
+      if (method === "POST" && leadPath[2]) return this.signal(deal, b);
+    }
+    if (method === "POST" && path === "/tasks") {
+      const fields: Record<string, string> = {};
+      if (typeof b.title !== "string" || !b.title || b.title.length > 200) fields.title = "1–200 Zeichen";
+      if (b.dueAt !== undefined && (typeof b.dueAt !== "string" || !ZONED.test(b.dueAt))) fields.dueAt = "ISO 8601 mit Zeitzone";
+      if (typeof b.externalId === "string" && b.externalId.length > 200) fields.externalId = "höchstens 200 Zeichen";
+      if (Object.keys(fields).length) return [422, err("validation_failed", "Die übermittelten Daten sind ungültig.", fields)];
+      if (b.leadId && !this.deals.some((d) => d.id === b.leadId)) return [404, err("not_found", "Lead nicht gefunden.")];
+      const existing = typeof b.externalId === "string" ? this.tasks.get(b.externalId) : undefined;
+      if (existing) return [200, { id: existing.id, url: `${this.appUrl}/tasks/${existing.id}`, duplicate: true }];
+      const id = this.id("tk");
+      this.tasks.set(String(b.externalId ?? id), { id, body: b });
+      return [201, { id, url: `${this.appUrl}/tasks/${id}`, duplicate: false }];
+    }
+    const sugg = /^\/contacts\/([^/]+)\/suggestions$/.exec(path);
+    if (method === "POST" && sugg) {
+      const contact = this.contacts.find((c) => c.id === decodeURIComponent(sugg[1]!));
+      if (!contact) return [404, err("not_found", "Kontakt nicht gefunden.")];
+      const fields = (b.fields ?? {}) as Record<string, string>;
+      const quote = (b.evidence as { quote?: string } | undefined)?.quote;
+      if (!Object.keys(fields).length) return [422, err("validation_failed", "Die übermittelten Daten sind ungültig.", { fields: "mindestens ein Feld" })];
+      if (quote && quote.length > 300) return [422, err("validation_failed", "Die übermittelten Daten sind ungültig.", { "evidence.quote": "höchstens 300 Zeichen" })];
+      this.suggestions.push({ contactId: contact.id, body: b });
+      const applied: string[] = [];
+      const proposed: string[] = [];
+      // Leere Felder füllen, abweichende vorschlagen – nie überschreiben
+      for (const key of ["phone", "jobTitle"] as const) {
+        const value = fields[key];
+        if (!value) continue;
+        if (!contact[key]) {
+          contact[key] = value;
+          applied.push(key);
+        } else if (contact[key] !== value) proposed.push(key);
+      }
+      return [200, { applied, proposed: proposed.length ? { id: this.id("sg"), fields: proposed } : null, contact: this.view(contact) }];
+    }
     return [404, err("not_found", "Unbekannter Pfad.")];
+  }
+
+  stageOf(deal: Deal) {
+    return PIPELINE.stages.find((s) => s.id === deal.stageId)!;
+  }
+
+  leadContext(deal: Deal) {
+    const contact = this.contacts.find((c) => c.id === deal.contactId)!;
+    return {
+      id: deal.id,
+      title: deal.title,
+      url: `${this.appUrl}/deals/${deal.id}`,
+      status: deal.status,
+      stage: { id: deal.stageId, name: this.stageOf(deal).name },
+      valueCents: deal.valueCents ?? 0,
+      currency: "EUR",
+      owner: { name: "Olga Okun", email: "olga@okun.test" },
+      contacts: [{ id: contact.id, name: contact.name, email: contact.email, isPrimary: true }],
+      operationalState: "waiting_for_us",
+      nextAction: deal.nextAction ?? null,
+      automationPausedUntil: deal.pausedUntil ?? null,
+      openTasks: [...this.tasks.values()].filter((t) => t.body.leadId === deal.id).map((t) => ({ id: t.id, title: t.body.title, dueAt: t.body.dueAt ?? null })),
+      recentActivities: [...this.activities.values()].filter((a) => a.body.leadId === deal.id).slice(-5).reverse().map((a) => ({ id: a.id, type: a.body.type, direction: a.body.direction, subject: a.body.subject ?? null })),
+      pendingSuggestions: [],
+    };
+  }
+
+  /** Signale nach ZUSATZ-ABLAEUFE.md §3: Phasen nur vorwärts, Gewonnen/Verloren nur als Vorschlag. */
+  signal(deal: Deal, b: Record<string, unknown>): [number, unknown] {
+    const fields: Record<string, string> = {};
+    const allowed = ["offer_sent", "offer_accepted", "offer_declined", "meeting_requested", "meeting_booked", "question", "out_of_office", "contract_sent", "contract_accepted"];
+    if (!allowed.includes(b.signal as string)) fields.signal = "unbekanntes Signal";
+    if (typeof b.occurredAt !== "string" || !ZONED.test(b.occurredAt)) fields.occurredAt = "ISO 8601 mit Zeitzone";
+    if (typeof b.externalId !== "string" || !b.externalId) fields.externalId = "Pflichtfeld";
+    const ev = b.evidence as { quote?: string; confidence?: number } | undefined;
+    if (ev?.quote && ev.quote.length > 300) fields["evidence.quote"] = "höchstens 300 Zeichen";
+    if (Object.keys(fields).length) return [422, err("validation_failed", "Die übermittelten Daten sind ungültig.", fields)];
+    const dup = this.signals.find((x) => x.leadId === deal.id && x.body.signal === b.signal && x.body.externalId === b.externalId);
+    if (dup) return [200, { ...dup.outcome, duplicate: true }];
+    const applied = ["timeline"];
+    const proposed: { id: string; kind: string; title: string }[] = [];
+    const ignored: string[] = [];
+    const forward = (stageId: string) => {
+      const target = PIPELINE.stages.find((s) => s.id === stageId)!;
+      if (deal.status !== "open") ignored.push("lead_closed: nur protokolliert");
+      else if (target.order > this.stageOf(deal).order) {
+        deal.stageId = stageId;
+        applied.push(`stage_changed:${target.name}`);
+      } else ignored.push("stage: nur vorwärts");
+    };
+    const data = (b.data ?? {}) as Record<string, unknown>;
+    switch (b.signal) {
+      case "offer_sent":
+        forward("st_angebot");
+        if (typeof data.valueCents === "number") {
+          if (!deal.valueCents) {
+            deal.valueCents = data.valueCents;
+            applied.push("value_updated");
+          } else if (deal.valueCents !== data.valueCents) proposed.push({ id: this.id("pr"), kind: "deal.update_value", title: "Wert aktualisieren?" });
+        }
+        deal.nextAction = { type: "chase_offer", title: "Angebot nachfassen", dueAt: new Date(Date.parse(String(b.occurredAt)) + 7 * 86_400_000).toISOString() };
+        applied.push("offer_follow_up");
+        break;
+      case "offer_accepted":
+      case "contract_accepted":
+        proposed.push({ id: this.id("pr"), kind: "deal.mark_won", title: "Als gewonnen markieren?" });
+        if (!ev?.quote) ignored.push("won: ohne wörtliches Zitat — deshalb nur ein Vorschlag.");
+        break;
+      case "offer_declined":
+        proposed.push({ id: this.id("pr"), kind: "deal.mark_lost", title: "Als verloren markieren?" });
+        break;
+      case "out_of_office":
+        deal.pausedUntil = (data.until as string) ?? new Date(Date.now() + 7 * 86_400_000).toISOString();
+        applied.push("automation_paused");
+        break;
+      default:
+        deal.nextAction = { type: b.signal === "meeting_requested" ? "schedule_meeting" : "follow_up", title: b.signal === "question" ? "Rückfrage beantworten" : "Termin vereinbaren", dueAt: null };
+        applied.push("next_action_set");
+    }
+    const outcome = {
+      signal: b.signal,
+      duplicate: false,
+      applied,
+      proposed,
+      ignored,
+      lead: { id: deal.id, url: `${this.appUrl}/deals/${deal.id}`, status: deal.status, stage: { id: deal.stageId, name: this.stageOf(deal).name }, valueCents: deal.valueCents ?? 0, nextAction: deal.nextAction ?? null, operationalState: "waiting_for_customer" },
+    };
+    this.signals.push({ leadId: deal.id, body: b, outcome });
+    return [201, outcome];
   }
 }
 

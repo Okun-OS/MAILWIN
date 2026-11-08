@@ -28,6 +28,8 @@ const ACTION: Record<string, string> = {
   crm_unlink_thread: "CRM-Zuordnung gelöst",
   approve_crm_create_lead: "Lead freigegeben",
   reject_crm_create_lead: "Lead abgelehnt",
+  crm_followup_draft: "Nachfass-Entwurf fürs CRM vorbereitet",
+  crm_followup_task: "Nachfass-Aufgabe aus dem CRM angelegt",
   sync: "Synchronisation",
 };
 

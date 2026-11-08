@@ -93,7 +93,7 @@ export default async function ThreadPage({ params, searchParams }: { params: Pro
 
       {/* Externer Aufruf ans CRM – gestreamt, damit die Konversation sofort erscheint */}
       <Suspense fallback={null}>
-        <CrmCard userId={user.id} threadId={thread.id} subject={thread.subject} />
+        <CrmCard userId={user.id} threadId={thread.id} subject={thread.subject} timezone={user.timezone} />
       </Suspense>
 
       <section className="card">
